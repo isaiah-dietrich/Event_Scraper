@@ -33,10 +33,34 @@ def read_input_urls(path: str) -> list[str]:
     return urls
 
 
+def _event_key(row: dict) -> tuple:
+    """Builds a dedupe key for an event row: source site + title + date."""
+    return (row.get("source_url", ""), row.get("title", ""), row.get("date", ""))
+
+
+def _existing_event_keys(sheet) -> set:
+    """Collects dedupe keys for every "ok" event row already in the sheet."""
+    status_index = OUTPUT_HEADERS.index("status")
+    source_url_index = OUTPUT_HEADERS.index("source_url")
+    title_index = OUTPUT_HEADERS.index("title")
+    date_index = OUTPUT_HEADERS.index("date")
+
+    keys = set()
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        if not row or row[status_index] != "ok":
+            continue
+        keys.add((row[source_url_index] or "", row[title_index] or "", row[date_index] or ""))
+    return keys
+
+
 def append_rows(path: str, rows: list[dict]) -> None:
     """Appends result rows to a master output spreadsheet.
 
     Creates the spreadsheet with a header row if it does not already exist.
+    Rows with status "ok" are skipped if a row with the same source_url,
+    title, and date is already present, so re-running the batch over the
+    same sites does not duplicate events. Non-"ok" status rows (failures,
+    no_events) are always appended.
 
     Args:
         path: Path to the output .xlsx file.
@@ -51,7 +75,18 @@ def append_rows(path: str, rows: list[dict]) -> None:
         sheet.title = "Events"
         sheet.append(OUTPUT_HEADERS)
 
+    existing_keys = _existing_event_keys(sheet)
+    skipped_count = 0
+
     for row in rows:
+        if row.get("status") == "ok":
+            key = _event_key(row)
+            if key in existing_keys:
+                skipped_count += 1
+                continue
+            existing_keys.add(key)
         sheet.append([row.get(column, "") for column in OUTPUT_HEADERS])
 
     workbook.save(path)
+    if skipped_count:
+        print(f"Skipped {skipped_count} duplicate event(s) already in {path}")
