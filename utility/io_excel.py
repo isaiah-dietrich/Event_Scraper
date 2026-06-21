@@ -7,7 +7,14 @@ from openpyxl import Workbook
 
 from scrape.extract import EXTRACTION_FIELDS
 
-OUTPUT_HEADERS = ["scraped_at", "source_url", "status", *EXTRACTION_FIELDS]
+OUTPUT_HEADERS = [
+    "scraped_at",
+    "source_url",
+    "status",
+    *EXTRACTION_FIELDS,
+    "fit_score",
+    "fit_reason",
+]
 
 
 def read_input_urls(path: str) -> list[str]:

@@ -1,10 +1,8 @@
 """Batch CLI: scrape every site in an input spreadsheet and append results.
 
-Reads site URLs from INPUT_PATH, runs the fetch/reduce/extract pipeline
-against each one concurrently, and appends the results to OUTPUT_PATH.
-
-Scoring is intentionally skipped for now (see scrape.score, to be wired
-back in later).
+Reads site URLs from INPUT_PATH, runs the fetch/reduce/extract/score
+pipeline against each one concurrently, and appends the results to
+OUTPUT_PATH.
 """
 
 import datetime
@@ -19,6 +17,7 @@ from scrape.extract import EXTRACTION_FIELDS
 from scrape.extract import extract_events
 from scrape.fetch import fetch_rendered_html
 from scrape.reduce import reduce_html
+from scrape.score import score_event
 from utility.io_excel import append_rows
 from utility.io_excel import read_input_urls
 
@@ -68,8 +67,11 @@ def process_site(client: Anthropic, url: str) -> list[dict]:
 
     rows = []
     for event in events:
+        scoring = score_event(client, event)
         row = {**base_row, "status": "ok"}
         row.update({field: event.get(field, "") for field in EXTRACTION_FIELDS})
+        row["fit_score"] = scoring["score"]
+        row["fit_reason"] = scoring["reason"]
         rows.append(row)
     return rows
 
