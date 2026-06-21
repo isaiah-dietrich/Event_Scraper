@@ -29,10 +29,15 @@ OUTPUT_PATH = "events_output.xlsx"
 # see ai_event_scraper.fetch), so don't set this too high locally.
 MAX_WORKERS = 4
 
+# Within a single site, events are scored concurrently too (one Haiku call
+# per event). This is independent of MAX_WORKERS above.
+MAX_SCORING_WORKERS = 8
+
 
 def _timestamp() -> str:
-    """Returns the current local time as an ISO-8601 string, seconds precision."""
-    return datetime.datetime.now().isoformat(timespec="seconds")
+    """Returns today's local date as "<Month> <Day>, <Year>", e.g. "June 21, 2026"."""
+    today = datetime.date.today()
+    return f"{today:%B} {today.day}, {today:%Y}"
 
 
 def process_site(client: Anthropic, url: str) -> list[dict]:
@@ -65,9 +70,11 @@ def process_site(client: Anthropic, url: str) -> list[dict]:
     if not events:
         return [{**base_row, "status": "no_events"}]
 
+    with ThreadPoolExecutor(max_workers=MAX_SCORING_WORKERS) as executor:
+        scorings = list(executor.map(lambda event: score_event(client, event), events))
+
     rows = []
-    for event in events:
-        scoring = score_event(client, event)
+    for event, scoring in zip(events, scorings):
         row = {**base_row, "status": "ok"}
         row.update({field: event.get(field, "") for field in EXTRACTION_FIELDS})
         row["fit_score"] = scoring["score"]

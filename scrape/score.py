@@ -5,7 +5,9 @@ import re
 
 from anthropic import Anthropic
 
-from scrape.extract import MODEL
+# Scoring is a small, cheap classification task, so it uses Haiku instead of
+# the larger Sonnet model used for extraction (see scrape.extract.MODEL).
+MODEL = "claude-haiku-4-5-20251001"
 
 # Edit this to tune what counts as a "good fit" event. Used verbatim in the
 # scoring prompt, so keep it as plain instructions for the model.

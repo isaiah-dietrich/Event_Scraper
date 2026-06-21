@@ -1,8 +1,10 @@
 """One-off helper to create the initial input/output spreadsheet templates."""
 
+import os
+
 from openpyxl import Workbook
 
-from utility.io_excel import OUTPUT_HEADERS
+from utility.io_excel import append_rows
 
 SAMPLE_SITES = [
     "https://ai.gatech.edu/events",
@@ -25,12 +27,10 @@ def build_input() -> None:
 
 
 def build_output_template() -> None:
-    """Creates an empty output spreadsheet with the expected header row."""
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Events"
-    sheet.append(OUTPUT_HEADERS)
-    workbook.save(OUTPUT_PATH)
+    """Creates an empty output spreadsheet with the expected header row/table."""
+    if os.path.exists(OUTPUT_PATH):
+        os.remove(OUTPUT_PATH)
+    append_rows(OUTPUT_PATH, [])
 
 
 if __name__ == "__main__":
