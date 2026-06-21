@@ -1,0 +1,10 @@
+api_keys
+.env
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+~$*.xlsx
+events.json
+events_output.xlsx
+README.md
