@@ -16,7 +16,7 @@ from scrape.fetch import fetch_rendered_html
 from scrape.reduce import reduce_html
 from scrape.score import score_event
 
-TARGET_URL = "https://ai4.io/"
+TARGET_URL = "https://members.tagonline.org/calendar"
 OUTPUT_PATH = "events.json"
 
 

@@ -22,6 +22,7 @@ TABLE_STYLE = "TableStyleMedium2"  # Built-in blue header, white/light-blue band
 OUTPUT_COLUMNS = [
     "title",
     "fit_score",
+    "date",
     "scraped_at",
     "source_url",
     "start_time",
@@ -35,6 +36,7 @@ OUTPUT_COLUMNS = [
 _DISPLAY_HEADERS = {
     "title": "Event Title",
     "fit_score": "Fit Score",
+    "date": "Event Date",
     "scraped_at": "Date Scraped",
     "source_url": "URL",
     "start_time": "Start Time",
@@ -76,8 +78,8 @@ def read_input_urls(path: str) -> list[str]:
 
 
 def _event_key(row: dict) -> tuple:
-    """Builds a dedupe key for an event row: source site + title."""
-    return (row.get("source_url", ""), row.get("title", ""))
+    """Builds a dedupe key for an event row: source site + title + date."""
+    return (row.get("source_url", ""), row.get("title", ""), row.get("date", ""))
 
 
 def _existing_event_keys(sheet) -> set:
@@ -85,12 +87,13 @@ def _existing_event_keys(sheet) -> set:
     status_index = OUTPUT_COLUMNS.index("status")
     source_url_index = OUTPUT_COLUMNS.index("source_url")
     title_index = OUTPUT_COLUMNS.index("title")
+    date_index = OUTPUT_COLUMNS.index("date")
 
     keys = set()
     for row in sheet.iter_rows(min_row=2, values_only=True):
         if not row or row[status_index] != "ok":
             continue
-        keys.add((row[source_url_index] or "", row[title_index] or ""))
+        keys.add((row[source_url_index] or "", row[title_index] or "", row[date_index] or ""))
     return keys
 
 
@@ -162,6 +165,7 @@ def append_rows(path: str, rows: list[dict]) -> None:
             key = _event_key(row)
             if key in existing_keys:
                 skipped_count += 1
+                print(f"  [dedup skip] {key[0]} | {key[1]}")
                 continue
             existing_keys.add(key)
         sheet.append([row.get(column, "") for column in OUTPUT_COLUMNS])

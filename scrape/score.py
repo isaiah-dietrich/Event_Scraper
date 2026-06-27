@@ -12,7 +12,13 @@ MODEL = "claude-haiku-4-5-20251001"
 # Edit this to tune what counts as a "good fit" event. Used verbatim in the
 # scoring prompt, so keep it as plain instructions for the model.
 SCORING_CRITERIA = """
-- In-person events in Georgia are preferred. Virtual-only events score low.
+- If the event has zero mention of AI, machine learning, or automation, it is
+  an automatic 1 regardless of any other criteria.
+- In-person events in Georgia score highest.
+- Virtual-only events score 2 or below UNLESS they are clearly Georgia-focused
+  or hosted by a Georgia institution (e.g. Georgia Tech, TAG, an Atlanta-based
+  org). A national corporate webinar from Google, Microsoft, or similar scores
+  1. A Georgia Tech or TAG virtual event scores 3-4.
 - Educational AI events are good (technical talks, conferences, industry
   discussions on AI).
 - Pure paid AI training or events that are heavy-handed sales pitches for the

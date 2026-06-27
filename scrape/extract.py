@@ -66,10 +66,15 @@ def extract_events(client: Anthropic, page_text: str) -> list[dict]:
     )
     response = client.messages.create(
         model=MODEL,
-        max_tokens=4096,
+        max_tokens=8192,
         messages=[{"role": "user", "content": prompt}],
     )
     raw_text = response.content[0].text.strip()
+    if response.stop_reason == "max_tokens":
+        raise ValueError(
+            "Model response was truncated (hit max_tokens) before completing "
+            f"the JSON array.\nRaw output:\n{raw_text[:1000]}"
+        )
     return _parse_json_array(raw_text)
 
 

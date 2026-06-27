@@ -1,5 +1,3 @@
-"""One-off helper to create the initial input/output spreadsheet templates."""
-
 import os
 
 from openpyxl import Workbook
