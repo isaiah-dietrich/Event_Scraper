@@ -80,26 +80,59 @@ _STATE_NAME_TO_ABBR = {name.lower(): abbr for abbr, name in _STATE_ABBREVIATIONS
 # when scanning from the right (e.g. "Atlanta, GA, USA").
 _NOISE_LOCATION_SEGMENTS = {"usa", "us", "u.s.", "u.s.a.", "united states"}
 
+# Matches a standalone state abbreviation (uppercase only, to avoid matching
+# common lowercase words like "in" or "or") within a segment, e.g. the "GA"
+# in "GA (contact venue@example.com)".
+_STATE_ABBR_PATTERN = re.compile(r"\b(" + "|".join(_STATE_ABBREVIATIONS) + r")\b")
+# Matches a full state name within a segment, longest names first so "West
+# Virginia" isn't cut short by a "Virginia" match starting at the same spot.
+_STATE_NAME_PATTERN = re.compile(
+    r"\b("
+    + "|".join(re.escape(name) for name in sorted(_STATE_ABBREVIATIONS.values(), key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
+
 
 def _extract_us_state(location: str) -> str | None:
     """Returns the 2-letter US state code named in a location string, if any.
 
-    Expects the common "<city>, <STATE>" convention: it scans comma-separated
-    segments from the right, skipping empty/country segments, and checks the
-    first remaining segment against known state names/abbreviations. Returns
-    None (rather than guessing) for locations with no comma-separated state
-    segment at all (e.g. "Virtual", "Zoom", a bare city) so those events fall
-    through to normal AI scoring instead of being silently discarded.
+    Expects the common "<city>, <STATE>" convention: it splits on commas and
+    looks at the last non-empty, non-country segment. If the location has no
+    comma at all, that lone segment must exactly equal a state name/
+    abbreviation (a bare "Georgia" counts, but "Georgia Institute of
+    Technology" or "Texas Roadhouse" don't - free text incidentally
+    containing a state's name isn't a reliable signal on its own). If the
+    location does have commas, that final segment only needs to *contain* a
+    state abbreviation/name (so trailing text like
+    "GA (contact venue@example.com)" still matches), since a dedicated
+    trailing segment is a much stronger signal that it's meant to carry
+    state/region info.
+
+    Returns None (rather than guessing) for locations with no confidently
+    identifiable US state (e.g. "Virtual", "Zoom", a foreign city/country)
+    so those events fall through to normal AI scoring instead of being
+    silently discarded.
     """
     if not location:
         return None
-    for part in reversed([segment.strip() for segment in location.split(",")]):
+    raw_segments = location.split(",")
+    has_multiple_segments = len(raw_segments) > 1
+    for part in reversed([segment.strip() for segment in raw_segments]):
         cleaned = re.sub(r"\d", "", part).strip()
         if not cleaned or cleaned.lower() in _NOISE_LOCATION_SEGMENTS:
             continue
-        if cleaned.upper() in _STATE_ABBREVIATIONS:
-            return cleaned.upper()
-        return _STATE_NAME_TO_ABBR.get(cleaned.lower())
+        if not has_multiple_segments:
+            if cleaned.upper() in _STATE_ABBREVIATIONS:
+                return cleaned.upper()
+            return _STATE_NAME_TO_ABBR.get(cleaned.lower())
+        abbr_match = _STATE_ABBR_PATTERN.search(cleaned)
+        if abbr_match:
+            return abbr_match.group(1)
+        name_match = _STATE_NAME_PATTERN.search(cleaned)
+        if name_match:
+            return _STATE_NAME_TO_ABBR[name_match.group(1).lower()]
+        return None
     return None
 
 
