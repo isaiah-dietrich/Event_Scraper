@@ -83,7 +83,7 @@ def _timestamp() -> str:
     return f"{today:%B} {today.day}, {today:%Y}"
 
 
-def process_site(client: Anthropic, url: str, emit=None) -> list[dict]:
+def process_site(client: Anthropic, url: str) -> list[dict]:
     """Runs fetch, reduce, and extract for one site.
 
     Args:
@@ -94,43 +94,27 @@ def process_site(client: Anthropic, url: str, emit=None) -> list[dict]:
         A list of output row dicts: one per extracted event on success, or
         a single row describing the failure/empty-result status otherwise.
     """
-    def _emit(event_type, **data):
-        if emit:
-            emit(event_type, url=url, **data)
-
     base_row = {"scraped_at": _timestamp(), "source_url": url}
 
-    _emit("step_start", step="fetch")
     try:
         html = fetch_rendered_html(url)
     except RuntimeError as error:
-        _emit("step_failed", step="fetch", error=str(error))
         return [{**base_row, "status": f"failed: {error}"}]
-    _emit("step_done", step="fetch")
 
-    _emit("step_start", step="reduce")
     page_text = reduce_html(html)
     if not page_text:
-        _emit("step_failed", step="reduce", error="empty page text")
         return [{**base_row, "status": "failed: empty page text after reduction"}]
-    _emit("step_done", step="reduce")
 
-    _emit("step_start", step="extract")
     try:
         events = extract_events(client, page_text)
     except ValueError as error:
-        _emit("step_failed", step="extract", error=str(error))
         return [{**base_row, "status": f"failed: {error}"}]
     events = _filter_past_events(events)
     if not events:
-        _emit("step_done", step="extract", detail="0 events")
         return [{**base_row, "status": "no_events"}]
-    _emit("step_done", step="extract", detail=f"{len(events)} events")
 
-    _emit("step_start", step="score")
     with ThreadPoolExecutor(max_workers=MAX_SCORING_WORKERS) as executor:
         scorings = list(executor.map(lambda event: score_event(client, event), events))
-    _emit("step_done", step="score")
 
     rows = []
     for event, scoring in zip(events, scorings):
@@ -140,10 +124,6 @@ def process_site(client: Anthropic, url: str, emit=None) -> list[dict]:
         row["confidence"] = scoring["confidence"]
         row["fit_reason"] = scoring["reason"]
         rows.append(row)
-        _emit("event_result",
-              title=event.get("title", "Untitled"),
-              score=scoring["score"],
-              reason=scoring["reason"])
     return rows
 
 
@@ -157,11 +137,7 @@ def main() -> None:
 
     test_mode = "--test" in sys.argv
     fresh_mode = "--fresh" in sys.argv
-    viz_mode = "--viz" in sys.argv
 
-    viz_emit = None
-    if viz_mode:
-        from viz.server import emit as viz_emit
     if test_mode:
         urls = TEST_URLS
         output_path = TEST_OUTPUT_PATH
@@ -184,13 +160,10 @@ def main() -> None:
         sys.exit(0)
 
     print(f"Processing {len(urls)} site(s) from {source} (up to {MAX_WORKERS} at a time)...")
-    if viz_emit:
-        for url in urls:
-            viz_emit("site_queued", url=url)
 
     all_rows = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_url = {executor.submit(process_site, client, url, viz_emit): url for url in urls}
+        future_to_url = {executor.submit(process_site, client, url): url for url in urls}
         for future in as_completed(future_to_url):
             url = future_to_url[future]
             try:
@@ -206,10 +179,6 @@ def main() -> None:
                 suffix = f": {row.get('title')}" if row["status"] == "ok" else ""
                 print(f"    -> {row['status']}{suffix}")
             all_rows.extend(rows)
-
-    if viz_emit:
-        from viz.server import render_and_open
-        render_and_open()
 
     append_rows(output_path, all_rows)
     print(f"\nAppended {len(all_rows)} row(s) to {output_path}")
