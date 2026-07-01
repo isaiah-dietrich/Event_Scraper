@@ -7,6 +7,7 @@ OUTPUT_PATH.
 
 import datetime
 import os
+import re
 import sys
 from concurrent.futures import as_completed
 from concurrent.futures import ThreadPoolExecutor
@@ -33,6 +34,12 @@ TEST_URLS = [
     "https://members.tagonline.org/calendar",
     "https://www.georgiamanufacturingalliance.com/events/",
     "https://www.aimanufacturingconference.com/",
+    "https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
+    "https://luma.com/genai-collective",
+    "https://gec1.wildapricot.org/events",
+    "https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events/?page=1",
+    "https://atlanta.aitinkerers.org/"
+
 ]
 
 # Each site gets its own browser instance and its own LLM call, run
@@ -46,6 +53,73 @@ MAX_SCORING_WORKERS = 8
 
 
 _DATE_PARSER_SETTINGS = {"PREFER_DATES_FROM": "future"}
+
+# Events whose location clearly names a US state other than this one are
+# auto-rejected before scoring (see _extract_us_state / _split_by_state), so
+# they never trigger a scoring AI call.
+TARGET_STATE = "GA"
+
+_STATE_ABBREVIATIONS = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+    "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+    "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+    "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+    "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+    "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+    "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+    "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+}
+_STATE_NAME_TO_ABBR = {name.lower(): abbr for abbr, name in _STATE_ABBREVIATIONS.items()}
+
+# Trailing location segments that carry no state info and should be skipped
+# when scanning from the right (e.g. "Atlanta, GA, USA").
+_NOISE_LOCATION_SEGMENTS = {"usa", "us", "u.s.", "u.s.a.", "united states"}
+
+
+def _extract_us_state(location: str) -> str | None:
+    """Returns the 2-letter US state code named in a location string, if any.
+
+    Expects the common "<city>, <STATE>" convention: it scans comma-separated
+    segments from the right, skipping empty/country segments, and checks the
+    first remaining segment against known state names/abbreviations. Returns
+    None (rather than guessing) for locations with no comma-separated state
+    segment at all (e.g. "Virtual", "Zoom", a bare city) so those events fall
+    through to normal AI scoring instead of being silently discarded.
+    """
+    if not location:
+        return None
+    for part in reversed([segment.strip() for segment in location.split(",")]):
+        cleaned = re.sub(r"\d", "", part).strip()
+        if not cleaned or cleaned.lower() in _NOISE_LOCATION_SEGMENTS:
+            continue
+        if cleaned.upper() in _STATE_ABBREVIATIONS:
+            return cleaned.upper()
+        return _STATE_NAME_TO_ABBR.get(cleaned.lower())
+    return None
+
+
+def _split_by_state(events: list[dict]) -> tuple[list[dict], list[tuple[dict, str]]]:
+    """Splits events into (needs_scoring, auto_rejected) by location state.
+
+    An event is auto-rejected only when its location names a US state we can
+    confidently parse and that state isn't TARGET_STATE. Events with no
+    location, an unparseable location, or a non-US location are left in
+    needs_scoring so they still go through normal AI scoring.
+    """
+    needs_scoring = []
+    auto_rejected = []
+    for event in events:
+        state = _extract_us_state(event.get("location", ""))
+        if state and state != TARGET_STATE:
+            auto_rejected.append((event, state))
+        else:
+            needs_scoring.append(event)
+    return needs_scoring, auto_rejected
 
 
 def _filter_past_events(events: list[dict]) -> list[dict]:
@@ -113,17 +187,33 @@ def process_site(client: Anthropic, url: str) -> list[dict]:
     if not events:
         return [{**base_row, "status": "no_events"}]
 
-    with ThreadPoolExecutor(max_workers=MAX_SCORING_WORKERS) as executor:
-        scorings = list(executor.map(lambda event: score_event(client, event), events))
+    events_to_score, auto_rejected = _split_by_state(events)
 
     rows = []
-    for event, scoring in zip(events, scorings):
+    for event, state in auto_rejected:
         row = {**base_row, "status": "ok"}
         row.update({field: event.get(field, "") for field in EXTRACTION_FIELDS})
-        row["fit_score"] = scoring["score"]
-        row["confidence"] = scoring["confidence"]
-        row["fit_reason"] = scoring["reason"]
+        row["fit_score"] = 1
+        row["confidence"] = "high"
+        row["fit_reason"] = (
+            f"Location is in {_STATE_ABBREVIATIONS[state]} ({state}), not "
+            f"{_STATE_ABBREVIATIONS[TARGET_STATE]}; auto-rejected without scoring."
+        )
         rows.append(row)
+
+    if events_to_score:
+        with ThreadPoolExecutor(max_workers=MAX_SCORING_WORKERS) as executor:
+            scorings = list(
+                executor.map(lambda event: score_event(client, event), events_to_score)
+            )
+        for event, scoring in zip(events_to_score, scorings):
+            row = {**base_row, "status": "ok"}
+            row.update({field: event.get(field, "") for field in EXTRACTION_FIELDS})
+            row["fit_score"] = scoring["score"]
+            row["confidence"] = scoring["confidence"]
+            row["fit_reason"] = scoring["reason"]
+            rows.append(row)
+
     return rows
 
 
