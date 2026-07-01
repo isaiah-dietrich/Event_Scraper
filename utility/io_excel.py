@@ -13,15 +13,16 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table
 from openpyxl.worksheet.table import TableStyleInfo
 
-TABLE_NAME = "EventsTable"
 TABLE_STYLE = "TableStyleMedium2"  # Built-in blue header, white/light-blue banded rows.
 
-# Internal row keys, in the order they should appear in the spreadsheet.
-# "date" (the event's own date) and "scraped_at" are tracked internally for
-# dedupe but only "scraped_at" is shown, per the requested column layout.
+EVENTS_SHEET_NAME = "Events"
+REJECTED_SHEET_NAME = "Rejected Events"
+
+# Internal row keys, in the order they should appear in each sheet.
 OUTPUT_COLUMNS = [
     "title",
     "fit_score",
+    "confidence",
     "date",
     "scraped_at",
     "source_url",
@@ -36,6 +37,7 @@ OUTPUT_COLUMNS = [
 _DISPLAY_HEADERS = {
     "title": "Event Title",
     "fit_score": "Fit Score",
+    "confidence": "Confidence",
     "date": "Event Date",
     "scraped_at": "Date Scraped",
     "source_url": "URL",
@@ -77,6 +79,15 @@ def read_input_urls(path: str) -> list[str]:
     return urls
 
 
+def _is_rejected(row: dict) -> bool:
+    """True for a scored event the model is confident is a poor fit (score 1)."""
+    return (
+        row.get("status") == "ok"
+        and row.get("fit_score") == 1
+        and str(row.get("confidence", "")).strip().lower() == "high"
+    )
+
+
 def _event_key(row: dict) -> tuple:
     """Builds a dedupe key for an event row: source site + title + date."""
     return (row.get("source_url", ""), row.get("title", ""), row.get("date", ""))
@@ -98,14 +109,15 @@ def _existing_event_keys(sheet) -> set:
 
 
 def _apply_table(sheet, last_row: int) -> None:
-    """Creates or resizes the Events table to cover all current rows."""
+    """Creates or resizes this sheet's table to cover all current rows."""
+    table_name = sheet.title.replace(" ", "") + "Table"
     last_column_letter = get_column_letter(len(OUTPUT_COLUMNS))
     table_ref = f"A1:{last_column_letter}{last_row}"
 
-    if TABLE_NAME in sheet.tables:
-        sheet.tables[TABLE_NAME].ref = table_ref
+    if table_name in sheet.tables:
+        sheet.tables[table_name].ref = table_ref
     else:
-        table = Table(displayName=TABLE_NAME, ref=table_ref)
+        table = Table(displayName=table_name, ref=table_ref)
         table.tableStyleInfo = TableStyleInfo(
             name=TABLE_STYLE, showRowStripes=True, showFirstColumn=False
         )
@@ -134,32 +146,43 @@ def _autosize_columns(sheet, last_row: int) -> None:
         )
 
 
-def append_rows(path: str, rows: list[dict]) -> None:
-    """Appends result rows to a master output spreadsheet.
+def _validate_header(sheet) -> None:
+    """Raises if an existing sheet's header row doesn't match OUTPUT_HEADERS.
 
-    Creates the spreadsheet with a header row and an Excel Table if it does
-    not already exist. Rows with status "ok" are skipped if a row with the
-    same source_url and title is already present, so re-running the batch
-    over the same sites does not duplicate events. Non-"ok" status rows
-    (failures, no_events) are always appended.
-
-    Args:
-        path: Path to the output .xlsx file.
-        rows: A list of dicts, each keyed by a subset of OUTPUT_COLUMNS plus
-            any extra fields used only for dedupe (e.g. the event's "date").
+    Appending rows in OUTPUT_COLUMNS order to a sheet with a different/older
+    header silently misaligns every column after the divergence point (this
+    has happened before, when the "date" column was added after some output
+    files already existed) - so we fail loudly instead of writing bad data.
     """
-    if os.path.exists(path):
-        workbook = load_workbook(path)
-        sheet = workbook.active
-    else:
-        workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = "Events"
-        sheet.append(OUTPUT_HEADERS)
+    header = [cell.value for cell in sheet[1]]
+    if header != OUTPUT_HEADERS:
+        raise RuntimeError(
+            f"Sheet {sheet.title!r} has header {header}, which does not "
+            f"match the current expected columns {OUTPUT_HEADERS}. "
+            "Appending would misalign data. Regenerate this output file "
+            "(or migrate its header row to match) before running again."
+        )
 
-    existing_keys = _existing_event_keys(sheet)
+
+def _get_or_create_sheet(workbook, title: str):
+    """Returns the named sheet, creating it with a header row if missing."""
+    if title in workbook.sheetnames:
+        sheet = workbook[title]
+        _validate_header(sheet)
+        return sheet
+    sheet = workbook.create_sheet(title)
+    sheet.append(OUTPUT_HEADERS)
+    return sheet
+
+
+def _append_to_sheet(sheet, rows: list[dict], existing_keys: set) -> int:
+    """Appends rows to one sheet, skipping "ok" rows already in existing_keys.
+
+    Mutates existing_keys with the key of every "ok" row actually written,
+    so a single key set can be shared across sheets to prevent the same
+    event ending up duplicated in both Events and Rejected Events.
+    """
     skipped_count = 0
-
     for row in rows:
         if row.get("status") == "ok":
             key = _event_key(row)
@@ -172,6 +195,41 @@ def append_rows(path: str, rows: list[dict]) -> None:
 
     _apply_table(sheet, sheet.max_row)
     _autosize_columns(sheet, sheet.max_row)
+    return skipped_count
+
+
+def append_rows(path: str, rows: list[dict]) -> None:
+    """Appends result rows to a master output spreadsheet.
+
+    Creates the spreadsheet with an "Events" sheet and a "Rejected Events"
+    sheet if it does not already exist. A scored event is routed to
+    Rejected Events if the model gave it fit_score 1 with high confidence;
+    everything else (including non-"ok" failure/no_events rows) goes to
+    Events. Rows with status "ok" are skipped if a row with the same
+    source_url, title, and date is already present in either sheet, so
+    re-running the batch over the same sites does not duplicate events or
+    let one flip between sheets across runs.
+
+    Args:
+        path: Path to the output .xlsx file.
+        rows: A list of dicts, each keyed by a subset of OUTPUT_COLUMNS plus
+            any extra fields used only for dedupe (e.g. the event's "date").
+    """
+    if os.path.exists(path):
+        workbook = load_workbook(path)
+    else:
+        workbook = Workbook()
+        workbook.remove(workbook.active)
+
+    events_sheet = _get_or_create_sheet(workbook, EVENTS_SHEET_NAME)
+    rejected_sheet = _get_or_create_sheet(workbook, REJECTED_SHEET_NAME)
+
+    existing_keys = _existing_event_keys(events_sheet) | _existing_event_keys(rejected_sheet)
+    normal_rows = [row for row in rows if not _is_rejected(row)]
+    rejected_rows = [row for row in rows if _is_rejected(row)]
+
+    skipped_count = _append_to_sheet(events_sheet, normal_rows, existing_keys)
+    skipped_count += _append_to_sheet(rejected_sheet, rejected_rows, existing_keys)
 
     workbook.save(path)
     if skipped_count:

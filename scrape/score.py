@@ -29,6 +29,8 @@ SCORING_CRITERIA = """
 _FENCE_START_PATTERN = re.compile(r"^```(?:json)?\s*")
 _FENCE_END_PATTERN = re.compile(r"\s*```$")
 
+_VALID_CONFIDENCE_LEVELS = ("low", "medium", "high")
+
 _SCORING_PROMPT_TEMPLATE = """\
 Rate how well this event fits the criteria below, on a scale of 1 (poor fit)
 to 5 (excellent fit). Use these criteria:
@@ -37,20 +39,27 @@ to 5 (excellent fit). Use these criteria:
 Event details (JSON):
 {event_json}
 
+Also rate your confidence in that score as "low", "medium", or "high",
+based on how complete and unambiguous the event details are (e.g. a vague
+or incomplete description warrants lower confidence).
+
 Return ONLY a valid JSON object (no prose, no markdown fences) with exactly
-two fields: "score" (integer 1-5) and "reason" (a single sentence).
+three fields: "score" (integer 1-5), "confidence" ("low", "medium", or
+"high"), and "reason" (a single sentence).
 """
 
 
 def score_event(client: Anthropic, event: dict) -> dict:
-    """Asks Claude to rate an event's fit from 1-5 with a one-line reason.
+    """Asks Claude to rate an event's fit from 1-5 with a confidence level.
 
     Args:
         client: An initialized Anthropic client.
         event: An event dict, as produced by extract.extract_events.
 
     Returns:
-        A dict with "score" (int, 1-5; 0 if unparseable) and "reason" (str).
+        A dict with "score" (int, 1-5; 0 if unparseable), "confidence"
+        ("low"/"medium"/"high", or "" if missing/invalid), and "reason"
+        (str).
     """
     prompt = _SCORING_PROMPT_TEMPLATE.format(
         criteria=SCORING_CRITERIA, event_json=json.dumps(event)
@@ -66,7 +75,11 @@ def score_event(client: Anthropic, event: dict) -> dict:
     try:
         result = json.loads(cleaned)
         score = int(result.get("score", 0))
+        confidence = str(result.get("confidence", "")).strip().lower()
+        if confidence not in _VALID_CONFIDENCE_LEVELS:
+            confidence = ""
         reason = str(result.get("reason", "")).strip()
     except (json.JSONDecodeError, ValueError, TypeError):
-        score, reason = 0, "Could not parse model score; defaulted to 0."
-    return {"score": score, "reason": reason}
+        score, confidence = 0, ""
+        reason = "Could not parse model score; defaulted to 0."
+    return {"score": score, "confidence": confidence, "reason": reason}

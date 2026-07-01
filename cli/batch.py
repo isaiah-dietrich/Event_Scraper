@@ -137,6 +137,7 @@ def process_site(client: Anthropic, url: str, emit=None) -> list[dict]:
         row = {**base_row, "status": "ok"}
         row.update({field: event.get(field, "") for field in EXTRACTION_FIELDS})
         row["fit_score"] = scoring["score"]
+        row["confidence"] = scoring["confidence"]
         row["fit_reason"] = scoring["reason"]
         rows.append(row)
         _emit("event_result",
