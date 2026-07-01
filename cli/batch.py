@@ -11,6 +11,7 @@ import sys
 from concurrent.futures import as_completed
 from concurrent.futures import ThreadPoolExecutor
 
+import dateparser
 from anthropic import Anthropic
 
 from scrape.extract import EXTRACTION_FIELDS
@@ -44,10 +45,18 @@ MAX_WORKERS = 4
 MAX_SCORING_WORKERS = 8
 
 
-_DATE_FORMATS = ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y")
+_DATE_PARSER_SETTINGS = {"PREFER_DATES_FROM": "future"}
 
 
 def _filter_past_events(events: list[dict]) -> list[dict]:
+    """Drops events dated before today; keeps events with unparseable dates.
+
+    Uses PREFER_DATES_FROM="future" so a yearless date like "January 10"
+    scraped in June resolves to next January rather than the one already
+    passed. Events whose date can't be parsed at all are kept (rather than
+    dropped) so an unusual format doesn't silently lose a real event, but a
+    warning is logged so bad formats are visible instead of silent.
+    """
     today = datetime.date.today()
     filtered = []
     for event in events:
@@ -55,16 +64,15 @@ def _filter_past_events(events: list[dict]) -> list[dict]:
         if not date_str:
             filtered.append(event)
             continue
-        for fmt in _DATE_FORMATS:
-            try:
-                event_date = datetime.datetime.strptime(date_str, fmt).date()
-                event["date"] = event_date.strftime("%B %-d, %Y")
-                if event_date >= today:
-                    filtered.append(event)
-                break
-            except ValueError:
-                continue
-        else:
+        parsed = dateparser.parse(date_str, settings=_DATE_PARSER_SETTINGS)
+        if parsed is None:
+            print(f"  [warn] could not parse event date {date_str!r} "
+                  f"for {event.get('title', 'Untitled')!r}; keeping it")
+            filtered.append(event)
+            continue
+        event_date = parsed.date()
+        event["date"] = event_date.strftime("%B %-d, %Y")
+        if event_date >= today:
             filtered.append(event)
     return filtered
 
