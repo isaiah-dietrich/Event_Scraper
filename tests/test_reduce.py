@@ -55,3 +55,31 @@ def test_script_regex_is_case_insensitive_and_multiline():
     result = reduce_html(html)
     assert "var x" not in result
     assert "ok" in result
+
+
+def test_preserves_image_alt_text_as_visible_text():
+    html = '<p>Before</p><img src="banner.png" alt="AI Tinkerers Atlanta meetup banner"><p>After</p>'
+    result = reduce_html(html)
+    assert "AI Tinkerers Atlanta meetup banner" in result
+    assert "Before" in result
+    assert "After" in result
+
+
+def test_preserves_image_alt_text_with_single_quotes():
+    html = "<img src='banner.png' alt='Single quoted alt text'>"
+    assert "Single quoted alt text" in reduce_html(html)
+
+
+def test_preserves_image_alt_text_regardless_of_attribute_order():
+    html = '<img alt="Alt comes first" src="banner.png" width="240">'
+    assert "Alt comes first" in reduce_html(html)
+
+
+def test_drops_image_tag_with_empty_alt_text():
+    html = '<p>Before</p><img src="icon.png" alt=""><p>After</p>'
+    assert reduce_html(html) == "Before\nAfter"
+
+
+def test_drops_image_tag_with_no_alt_attribute():
+    html = '<p>Before</p><img src="icon.png"><p>After</p>'
+    assert reduce_html(html) == "Before\nAfter"

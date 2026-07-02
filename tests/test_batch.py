@@ -401,3 +401,81 @@ def test_main_converts_unexpected_process_site_error_into_failure_row(monkeypatc
 
     assert len(appended["rows"]) == 1
     assert "unexpected crash" in appended["rows"][0]["status"]
+
+
+def test_main_per_site_mode_writes_one_sheet_per_url_instead_of_append_rows(monkeypatch, tmp_path):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+    monkeypatch.setattr(batch, "Anthropic", lambda api_key: object())
+    monkeypatch.setattr(batch.sys, "argv", ["run.py", "--per-site"])
+    monkeypatch.setattr(
+        batch, "read_input_urls", lambda path: ["https://a.example.com", "https://b.example.com"]
+    )
+    monkeypatch.setattr(batch, "PER_SITE_OUTPUT_PATH", str(tmp_path / "by_site.xlsx"))
+    monkeypatch.setattr(
+        batch,
+        "process_site",
+        lambda client, url: [{"status": "ok", "title": f"Event for {url}", "source_url": url}],
+    )
+
+    append_calls = []
+    monkeypatch.setattr(batch, "append_rows", lambda path, rows: append_calls.append((path, rows)))
+
+    per_site_calls = []
+    monkeypatch.setattr(
+        batch,
+        "write_per_site_sheets",
+        lambda path, rows_by_url: per_site_calls.append((path, rows_by_url)),
+    )
+
+    batch.main()
+
+    assert append_calls == []
+    assert len(per_site_calls) == 1
+    written_path, rows_by_url = per_site_calls[0]
+    assert written_path == str(tmp_path / "by_site.xlsx")
+    assert list(rows_by_url.keys()) == ["https://a.example.com", "https://b.example.com"]
+    assert rows_by_url["https://a.example.com"][0]["title"] == "Event for https://a.example.com"
+
+
+def test_main_per_site_mode_does_not_touch_normal_output_path(monkeypatch, tmp_path):
+    normal_output = tmp_path / "out.xlsx"
+    normal_output.write_text("existing real output - must survive")
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+    monkeypatch.setattr(batch, "Anthropic", lambda api_key: object())
+    monkeypatch.setattr(batch.sys, "argv", ["run.py", "--per-site", "--fresh"])
+    monkeypatch.setattr(batch, "read_input_urls", lambda path: ["https://a.example.com"])
+    monkeypatch.setattr(batch, "OUTPUT_PATH", str(normal_output))
+    monkeypatch.setattr(batch, "PER_SITE_OUTPUT_PATH", str(tmp_path / "by_site.xlsx"))
+    monkeypatch.setattr(batch, "process_site", lambda client, url: [{"status": "no_events"}])
+    monkeypatch.setattr(batch, "write_per_site_sheets", lambda path, rows_by_url: None)
+
+    batch.main()
+
+    # --fresh would normally delete OUTPUT_PATH, but --per-site never writes
+    # there, so it should be left untouched rather than deleted for nothing.
+    assert normal_output.read_text() == "existing real output - must survive"
+
+
+def test_main_per_site_mode_combines_with_test_mode(monkeypatch, tmp_path):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+    monkeypatch.setattr(batch, "Anthropic", lambda api_key: object())
+    monkeypatch.setattr(batch.sys, "argv", ["run.py", "--test", "--per-site"])
+    monkeypatch.setattr(batch, "TEST_URLS", ["https://only-test-site.example.com"])
+    monkeypatch.setattr(batch, "PER_SITE_OUTPUT_PATH", str(tmp_path / "by_site.xlsx"))
+    monkeypatch.setattr(
+        batch, "process_site", lambda client, url: [{"status": "ok", "title": "T", "source_url": url}]
+    )
+
+    per_site_calls = []
+    monkeypatch.setattr(
+        batch,
+        "write_per_site_sheets",
+        lambda path, rows_by_url: per_site_calls.append((path, rows_by_url)),
+    )
+
+    batch.main()
+
+    assert len(per_site_calls) == 1
+    _, rows_by_url = per_site_calls[0]
+    assert list(rows_by_url.keys()) == ["https://only-test-site.example.com"]

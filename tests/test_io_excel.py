@@ -3,11 +3,15 @@ from openpyxl import load_workbook
 from openpyxl import Workbook
 
 from utility.io_excel import _is_rejected
+from utility.io_excel import _sheet_title_from_url
+from utility.io_excel import _unique_sheet_title
+from utility.io_excel import _unique_table_name
 from utility.io_excel import append_rows
 from utility.io_excel import EVENTS_SHEET_NAME
 from utility.io_excel import OUTPUT_HEADERS
 from utility.io_excel import read_input_urls
 from utility.io_excel import REJECTED_SHEET_NAME
+from utility.io_excel import write_per_site_sheets
 
 
 def _ok_row(**overrides):
@@ -211,3 +215,144 @@ def test_append_rows_table_ref_grows_across_calls(tmp_path):
 
     assert first_ref == "A1:K2"
     assert second_ref == "A1:K3"
+
+
+# --- _sheet_title_from_url ---------------------------------------------
+
+
+def test_sheet_title_strips_scheme_and_replaces_forbidden_chars():
+    assert _sheet_title_from_url("https://example.com/events") == "example.com-events"
+    assert _sheet_title_from_url("http://example.com") == "example.com"
+
+
+def test_sheet_title_falls_back_to_site_for_empty_result():
+    assert _sheet_title_from_url("https://") == "site"
+
+
+# --- _unique_sheet_title -------------------------------------------------
+
+
+def test_unique_sheet_title_returns_base_when_no_collision():
+    assert _unique_sheet_title("https://a.example.com", set()) == "a.example.com"
+
+
+def test_unique_sheet_title_dedupes_on_collision():
+    used = {"a.example.com"}
+    assert _unique_sheet_title("https://a.example.com", used) == "a.example.com (2)"
+
+
+def test_unique_sheet_title_dedupes_multiple_collisions_in_order():
+    used = {"a.example.com", "a.example.com (2)"}
+    assert _unique_sheet_title("https://a.example.com", used) == "a.example.com (3)"
+
+
+def test_unique_sheet_title_truncates_to_excel_limit():
+    long_url = "https://" + "a" * 50 + ".example.com"
+    title = _unique_sheet_title(long_url, set())
+    assert len(title) == 31
+
+
+def test_unique_sheet_title_truncated_collision_still_fits_and_dedupes():
+    long_url = "https://" + "a" * 50 + ".example.com"
+    base_title = _unique_sheet_title(long_url, set())
+    deduped = _unique_sheet_title(long_url, {base_title.lower()})
+    assert len(deduped) <= 31
+    assert deduped != base_title
+
+
+# --- _unique_table_name --------------------------------------------------
+
+
+def test_unique_table_name_strips_non_word_characters():
+    assert _unique_table_name("a.example.com-events", set()) == "aexamplecomeventsTable"
+
+
+def test_unique_table_name_prefixes_leading_digit():
+    assert _unique_table_name("123events", set()) == "T123eventsTable"
+
+
+def test_unique_table_name_dedupes_on_collision():
+    used = {"aexamplecomTable"}
+    assert _unique_table_name("a.example.com", used) == "aexamplecomTable2"
+
+
+# --- write_per_site_sheets ------------------------------------------------
+
+
+def test_write_per_site_sheets_creates_one_sheet_per_url(tmp_path):
+    path = tmp_path / "by_site.xlsx"
+    rows_by_url = {
+        "https://a.example.com": [_ok_row(title="A Event", source_url="https://a.example.com")],
+        "https://b.example.com": [_ok_row(title="B Event", source_url="https://b.example.com")],
+    }
+
+    write_per_site_sheets(str(path), rows_by_url)
+
+    workbook = load_workbook(path)
+    assert set(workbook.sheetnames) == {"a.example.com", "b.example.com"}
+    a_titles = [row[0] for row in workbook["a.example.com"].iter_rows(min_row=2, values_only=True)]
+    b_titles = [row[0] for row in workbook["b.example.com"].iter_rows(min_row=2, values_only=True)]
+    assert a_titles == ["A Event"]
+    assert b_titles == ["B Event"]
+
+
+def test_write_per_site_sheets_uses_standard_headers(tmp_path):
+    path = tmp_path / "by_site.xlsx"
+
+    write_per_site_sheets(str(path), {"https://a.example.com": [_ok_row()]})
+
+    workbook = load_workbook(path)
+    header = [cell.value for cell in workbook["a.example.com"][1]]
+    assert header == OUTPUT_HEADERS
+
+
+def test_write_per_site_sheets_does_not_split_by_status_or_score(tmp_path):
+    path = tmp_path / "by_site.xlsx"
+    rows = [
+        _ok_row(title="Good Fit", fit_score=5, confidence="high"),
+        _ok_row(title="Bad Fit", fit_score=1, confidence="high"),
+        {"scraped_at": "June 30, 2026", "source_url": "https://a.example.com", "status": "no_events"},
+    ]
+
+    write_per_site_sheets(str(path), {"https://a.example.com": rows})
+
+    workbook = load_workbook(path)
+    # Only one sheet for this URL - good, bad, and no-events rows all together.
+    assert workbook.sheetnames == ["a.example.com"]
+    data_rows = list(workbook["a.example.com"].iter_rows(min_row=2, values_only=True))
+    assert len(data_rows) == 3
+
+
+def test_write_per_site_sheets_dedupes_colliding_sheet_titles(tmp_path):
+    path = tmp_path / "by_site.xlsx"
+    # These two URLs sanitize to the exact same sheet title ("/" and ":" or
+    # "?" both become "-"), so both map to "a.example.com-path-1".
+    rows_by_url = {
+        "https://a.example.com/path:1": [_ok_row(title="First")],
+        "https://a.example.com/path?1": [_ok_row(title="Second")],
+    }
+
+    write_per_site_sheets(str(path), rows_by_url)
+
+    workbook = load_workbook(path)
+    assert len(workbook.sheetnames) == 2
+    assert len(set(workbook.sheetnames)) == 2
+
+
+def test_write_per_site_sheets_overwrites_previous_run(tmp_path):
+    path = tmp_path / "by_site.xlsx"
+    write_per_site_sheets(str(path), {"https://old.example.com": [_ok_row(title="Old")]})
+
+    write_per_site_sheets(str(path), {"https://new.example.com": [_ok_row(title="New")]})
+
+    workbook = load_workbook(path)
+    assert workbook.sheetnames == ["new.example.com"]
+
+
+def test_write_per_site_sheets_handles_empty_input(tmp_path):
+    path = tmp_path / "by_site.xlsx"
+
+    write_per_site_sheets(str(path), {})
+
+    workbook = load_workbook(path)
+    assert workbook.sheetnames == ["No Sites"]

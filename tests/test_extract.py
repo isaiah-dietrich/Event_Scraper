@@ -79,3 +79,13 @@ def test_prompt_includes_fields_and_page_text(fake_client):
     assert "UNIQUE_PAGE_MARKER" in prompt
     for field in EXTRACTION_FIELDS:
         assert field in prompt
+
+
+def test_prompt_warns_against_city_directory_navigation_widgets(fake_client):
+    client = fake_client(["[]"])
+
+    extract_events(client, "some page text")
+
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "browse other cities" in prompt
+    assert "navigation" in prompt

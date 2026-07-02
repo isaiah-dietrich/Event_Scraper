@@ -5,6 +5,7 @@ banded style) so the sheet stays sortable/filterable as it grows.
 """
 
 import os
+import re
 
 from openpyxl import load_workbook
 from openpyxl import Workbook
@@ -108,9 +109,16 @@ def _existing_event_keys(sheet) -> set:
     return keys
 
 
-def _apply_table(sheet, last_row: int) -> None:
-    """Creates or resizes this sheet's table to cover all current rows."""
-    table_name = sheet.title.replace(" ", "") + "Table"
+def _apply_table(sheet, last_row: int, table_name: str | None = None) -> None:
+    """Creates or resizes this sheet's table to cover all current rows.
+
+    `table_name` defaults to deriving one from the sheet title (fine for the
+    fixed "Events"/"Rejected Events" titles), but callers with less
+    predictable, non-identifier-safe titles (e.g. one sheet per site URL)
+    should pass an already-sanitized, workbook-unique name explicitly.
+    """
+    if table_name is None:
+        table_name = sheet.title.replace(" ", "") + "Table"
     last_column_letter = get_column_letter(len(OUTPUT_COLUMNS))
     table_ref = f"A1:{last_column_letter}{last_row}"
 
@@ -234,3 +242,92 @@ def append_rows(path: str, rows: list[dict]) -> None:
     workbook.save(path)
     if skipped_count:
         print(f"Skipped {skipped_count} duplicate event(s) already in {path}")
+
+
+# --- Per-site diagnostic output ---------------------------------------------
+#
+# write_per_site_sheets is a separate, testing-only output path (see
+# cli.batch's --per-site flag): one sheet per scraped URL, so a run's
+# accuracy can be eyeballed site-by-site. It intentionally does not reuse
+# append_rows' Events/Rejected split or cross-run dedupe - every run starts
+# from a blank workbook. The normal, permanent output format is still the
+# single Events/Rejected Events workbook produced by append_rows.
+
+_SHEET_NAME_FORBIDDEN_PATTERN = re.compile(r"[:\\/?*\[\]]")
+_MAX_SHEET_NAME_LENGTH = 31  # Excel's hard cap on sheet title length.
+_TABLE_NAME_FORBIDDEN_PATTERN = re.compile(r"\W")
+
+
+def _sheet_title_from_url(url: str) -> str:
+    """Builds an Excel-safe (but not yet dedupe-safe) sheet title from a URL."""
+    title = re.sub(r"^https?://", "", url)
+    title = _SHEET_NAME_FORBIDDEN_PATTERN.sub("-", title).strip().strip("'")
+    return title or "site"
+
+
+def _unique_sheet_title(url: str, used_titles: set) -> str:
+    """Returns an Excel-safe sheet title for `url`, deduped against `used_titles`.
+
+    Excel sheet titles are capped at 31 characters and must be unique
+    (case-insensitively) within a workbook, so a repeated URL - or two
+    different URLs that collide once truncated - gets a " (2)", " (3)", ...
+    suffix. `used_titles` is expected to hold already-lowercased titles.
+    """
+    base = _sheet_title_from_url(url)[:_MAX_SHEET_NAME_LENGTH]
+    candidate = base
+    suffix = 2
+    while candidate.lower() in used_titles:
+        tag = f" ({suffix})"
+        candidate = base[: _MAX_SHEET_NAME_LENGTH - len(tag)] + tag
+        suffix += 1
+    return candidate
+
+
+def _unique_table_name(sheet_title: str, used_names: set) -> str:
+    """Builds a valid, workbook-unique Excel table name from a sheet title.
+
+    Unlike sheet titles, table names must be word-characters only and can't
+    start with a digit, so a URL-derived title (dashes, dots, etc.) can't be
+    reused as-is.
+    """
+    base = _TABLE_NAME_FORBIDDEN_PATTERN.sub("", sheet_title) or "Site"
+    if base[0].isdigit():
+        base = f"T{base}"
+    candidate = base + "Table"
+    suffix = 2
+    while candidate in used_names:
+        candidate = f"{base}Table{suffix}"
+        suffix += 1
+    return candidate
+
+
+def write_per_site_sheets(path: str, rows_by_url: dict) -> None:
+    """Writes one sheet per site URL into a dedicated diagnostic workbook.
+
+    Args:
+        path: Path to the .xlsx file to (over)write.
+        rows_by_url: Ordered mapping of URL to that site's result rows (in
+            the same row-dict shape append_rows expects).
+    """
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+
+    used_titles = set()
+    used_table_names = set()
+    for url, rows in rows_by_url.items():
+        title = _unique_sheet_title(url, used_titles)
+        used_titles.add(title.lower())
+        table_name = _unique_table_name(title, used_table_names)
+        used_table_names.add(table_name)
+
+        sheet = workbook.create_sheet(title)
+        sheet.append(OUTPUT_HEADERS)
+        for row in rows:
+            sheet.append([row.get(column, "") for column in OUTPUT_COLUMNS])
+        _apply_table(sheet, sheet.max_row, table_name=table_name)
+        _autosize_columns(sheet, sheet.max_row)
+
+    if not workbook.sheetnames:
+        workbook.create_sheet("No Sites")
+
+    workbook.save(path)

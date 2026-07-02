@@ -22,22 +22,28 @@ from scrape.reduce import reduce_html
 from scrape.score import score_event
 from utility.io_excel import append_rows
 from utility.io_excel import read_input_urls
+from utility.io_excel import write_per_site_sheets
 
 INPUT_PATH = "websites.xlsx"
 OUTPUT_PATH = "events_output.xlsx"
 TEST_OUTPUT_PATH = "events_output_test.xlsx"
 
+# Diagnostic-only output for --per-site (see main()): one sheet per URL, so a
+# run's accuracy can be checked site-by-site. Not the permanent output format
+# - that's still the single Events/Rejected Events workbook via append_rows.
+PER_SITE_OUTPUT_PATH = "events_output_by_site.xlsx"
+
 # Paste site URLs here to test the pipeline without touching websites.xlsx.
 # Run with: python run.py --test
 TEST_URLS = [
-    "https://ai.gatech.edu/events",
-    "https://members.tagonline.org/calendar",
-    "https://www.georgiamanufacturingalliance.com/events/",
-    "https://www.aimanufacturingconference.com/",
-    "https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
-    "https://luma.com/genai-collective",
-    "https://gec1.wildapricot.org/events",
-    "https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events/?page=1",
+    #"https://ai.gatech.edu/events",
+    #"https://members.tagonline.org/calendar",
+    #"https://www.georgiamanufacturingalliance.com/events/",
+    #"https://www.aimanufacturingconference.com/",
+    #"https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
+    #"https://luma.com/genai-collective",
+    #"https://gec1.wildapricot.org/events",
+    #"https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events/?page=1",
     "https://atlanta.aitinkerers.org/"
 
 ]
@@ -260,6 +266,7 @@ def main() -> None:
 
     test_mode = "--test" in sys.argv
     fresh_mode = "--fresh" in sys.argv
+    per_site_mode = "--per-site" in sys.argv
 
     if test_mode:
         urls = TEST_URLS
@@ -274,7 +281,10 @@ def main() -> None:
         output_path = OUTPUT_PATH
         source = INPUT_PATH
 
-    if (fresh_mode or test_mode) and os.path.exists(output_path):
+    # --per-site writes to its own dedicated file (see PER_SITE_OUTPUT_PATH)
+    # instead of output_path, so there's nothing to clear out here for it -
+    # write_per_site_sheets always starts from a blank workbook on its own.
+    if (fresh_mode or test_mode) and not per_site_mode and os.path.exists(output_path):
         os.remove(output_path)
         print(f"Removed existing {output_path}")
 
@@ -285,6 +295,7 @@ def main() -> None:
     print(f"Processing {len(urls)} site(s) from {source} (up to {MAX_WORKERS} at a time)...")
 
     all_rows = []
+    rows_by_url = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_url = {executor.submit(process_site, client, url): url for url in urls}
         for future in as_completed(future_to_url):
@@ -302,9 +313,16 @@ def main() -> None:
                 suffix = f": {row.get('title')}" if row["status"] == "ok" else ""
                 print(f"    -> {row['status']}{suffix}")
             all_rows.extend(rows)
+            rows_by_url[url] = rows
 
-    append_rows(output_path, all_rows)
-    print(f"\nAppended {len(all_rows)} row(s) to {output_path}")
+    if per_site_mode:
+        # Written in the original URL order (not completion order) for
+        # readability, since as_completed() finishes them out of order.
+        write_per_site_sheets(PER_SITE_OUTPUT_PATH, {url: rows_by_url[url] for url in urls})
+        print(f"\nWrote {len(urls)} site sheet(s) to {PER_SITE_OUTPUT_PATH}")
+    else:
+        append_rows(output_path, all_rows)
+        print(f"\nAppended {len(all_rows)} row(s) to {output_path}")
 
 
 if __name__ == "__main__":

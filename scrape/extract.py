@@ -40,6 +40,15 @@ Rules:
   is_in_person).
 - "signup_link" should be the registration/details URL if present, else "".
 - Do not invent events that are not in the text.
+- Ignore generic site-navigation elements, such as a "browse other
+  cities/locations" directory or menu, even if entries in it pair a place
+  name with a short date fragment (e.g. "Next: Jul 8" or "Last: 1w ago").
+  Those are links to other pages, not event listings - a real event has an
+  actual title/description of what happens at it, not just a bare place
+  name plus a date fragment.
+- Only extract events that belong to this page's own subject; do not pull
+  in events for other cities/locations that are merely linked to from a
+  "browse other cities" directory elsewhere on the page.
 - If the page does not mention any events at all, return an empty JSON
   array [].
 
