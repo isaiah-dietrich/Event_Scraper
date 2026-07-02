@@ -19,6 +19,12 @@ _SETTLE_POLL_INTERVAL_MS = 500
 _SETTLE_STABLE_CHECKS = 2  # consecutive unchanged reads required to call it settled
 _MAX_SETTLE_WAIT_MS = 20_000  # give up and use whatever's rendered by here
 
+# Scroll-triggered lazy loading: some event-calendar pages (e.g. Luma) only
+# render the next batch of events once you scroll near the bottom, so a
+# single page load only ever sees whatever fits in the initial viewport.
+_MAX_SCROLL_ATTEMPTS = 8  # give up here even if the page keeps growing
+_SCROLL_WAIT_MS = 1_000  # time to let a scroll's newly-loaded content render
+
 
 def _wait_for_content_to_settle(page) -> str:
     """Polls page.content() until it stops changing, then returns it.
@@ -41,19 +47,56 @@ def _wait_for_content_to_settle(page) -> str:
     return current_html
 
 
+def _scroll_and_collect_snapshots(page) -> list[str]:
+    """Scrolls to the bottom repeatedly, capturing an HTML snapshot each time
+    the page actually grows.
+
+    Some event-calendar pages (Luma, etc.) use a *virtualized* list: only a
+    window of events is ever mounted in the DOM at once, and earlier ones
+    get unmounted as later ones scroll into view. That means no single
+    scroll position ever shows the whole list - so instead of scrolling to
+    the end and capturing once, this captures a snapshot at every step
+    where new content loaded and returns them all, to be combined into one
+    block of text before extraction. A duplicate/overlapping event
+    mentioned in more than one snapshot is harmless: extraction already
+    treats repeated mentions of the same event as one distinct event
+    rather than double-counting it.
+
+    Stops once a scroll doesn't grow the page (nothing more to load),
+    rather than always running the full _MAX_SCROLL_ATTEMPTS - but gives up
+    at that cap regardless, since some calendars have an effectively
+    unbounded number of future events to keep loading.
+    """
+    snapshots = []
+    previous_height = page.evaluate("document.body.scrollHeight")
+    for _ in range(_MAX_SCROLL_ATTEMPTS):
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(_SCROLL_WAIT_MS)
+        current_height = page.evaluate("document.body.scrollHeight")
+        if current_height <= previous_height:
+            break
+        snapshots.append(page.content())
+        previous_height = current_height
+    return snapshots
+
+
 def fetch_rendered_html(url: str) -> str:
-    """Loads a URL in Chromium and returns the fully rendered HTML.
+    """Loads a URL in Chromium and returns its rendered HTML.
 
     Runs Chromium non-headless with a realistic user agent, since some
     sites (e.g. those behind Cloudflare) detect and block headless
     automation outright. See _wait_for_content_to_settle for how it decides
-    the page is done rendering before capturing HTML.
+    the initial page is done rendering, and _scroll_and_collect_snapshots
+    for how additional lazy/infinite-scroll content (including from
+    virtualized lists that unmount earlier items) is pulled in and combined
+    with it.
 
     Args:
         url: The page to load.
 
     Returns:
-        The page's rendered HTML as a string.
+        The initial settled HTML, plus one snapshot per scroll step that
+        loaded new content, joined together as a single string.
 
     Raises:
         RuntimeError: If the page fails to load for any reason.
@@ -63,8 +106,9 @@ def fetch_rendered_html(url: str) -> str:
             browser = playwright.chromium.launch(headless=False)
             page = browser.new_page(user_agent=_USER_AGENT, viewport=_VIEWPORT)
             page.goto(url, wait_until="domcontentloaded", timeout=_GOTO_TIMEOUT_MS)
-            html = _wait_for_content_to_settle(page)
+            first_snapshot = _wait_for_content_to_settle(page)
+            more_snapshots = _scroll_and_collect_snapshots(page)
             browser.close()
-            return html
+            return "\n".join([first_snapshot] + more_snapshots)
     except Exception as error:
         raise RuntimeError(f"Failed to load page with Playwright: {error}") from error

@@ -41,10 +41,10 @@ TEST_URLS = [
     #"https://www.georgiamanufacturingalliance.com/events/",
     #"https://www.aimanufacturingconference.com/",
     #"https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
-    #"https://luma.com/genai-collective",
+    "https://luma.com/genai-collective",
     #"https://gec1.wildapricot.org/events",
     #"https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events/?page=1",
-    "https://atlanta.aitinkerers.org/"
+    #"https://atlanta.aitinkerers.org/"
 
 ]
 
@@ -169,6 +169,15 @@ def _filter_past_events(events: list[dict]) -> list[dict]:
     passed. Events whose date can't be parsed at all are kept (rather than
     dropped) so an unusual format doesn't silently lose a real event, but a
     warning is logged so bad formats are visible instead of silent.
+
+    A successfully parsed event's "date" is replaced with a real
+    datetime.datetime (not a formatted string), so it's written to the
+    spreadsheet as an actual date value that Excel can sort/filter on
+    correctly - see utility.io_excel.append_rows. It's specifically a
+    datetime rather than a plain date because openpyxl always reads date
+    cells back as datetime.datetime, and dedupe (_event_key) needs a run's
+    freshly computed value to compare equal to that same event re-read from
+    a previous run's output.
     """
     today = datetime.date.today()
     filtered = []
@@ -184,7 +193,7 @@ def _filter_past_events(events: list[dict]) -> list[dict]:
             filtered.append(event)
             continue
         event_date = parsed.date()
-        event["date"] = event_date.strftime("%B %-d, %Y")
+        event["date"] = datetime.datetime.combine(event_date, datetime.time())
         if event_date >= today:
             filtered.append(event)
     return filtered

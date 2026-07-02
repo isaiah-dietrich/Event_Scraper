@@ -1,3 +1,4 @@
+import datetime
 import json
 
 from scrape.score import score_event
@@ -72,3 +73,17 @@ def test_prompt_includes_event_json_and_criteria(fake_client):
     prompt = client.calls[0]["messages"][0]["content"]
     assert "UNIQUE_EVENT_MARKER" in prompt
     assert "Georgia" in prompt
+
+
+def test_handles_event_with_real_datetime_date(fake_client):
+    # By the time an event reaches scoring, "date" is a real datetime.datetime
+    # (see cli.batch._filter_past_events) - json.dumps(event) must not choke
+    # on that, the way it would with the plain json encoder by default.
+    client = fake_client([json.dumps({"score": 4, "confidence": "high", "reason": "x"})])
+    event = {"title": "Dated Event", "date": datetime.datetime(2026, 10, 12)}
+
+    result = score_event(client, event)
+
+    assert result["score"] == 4
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "2026-10-12" in prompt

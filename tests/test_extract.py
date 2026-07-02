@@ -89,3 +89,14 @@ def test_prompt_warns_against_city_directory_navigation_widgets(fake_client):
     prompt = client.calls[0]["messages"][0]["content"]
     assert "browse other cities" in prompt
     assert "navigation" in prompt
+
+
+def test_prompt_forbids_synthesizing_description_from_title_alone(fake_client):
+    client = fake_client(["[]"])
+
+    extract_events(client, "some page text")
+
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "short_description" in prompt
+    assert "synthesize" in prompt.lower()
+    assert "title, date, and location" in prompt.lower()

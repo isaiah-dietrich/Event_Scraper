@@ -40,6 +40,10 @@ Rules:
   is_in_person).
 - "signup_link" should be the registration/details URL if present, else "".
 - Do not invent events that are not in the text.
+- "short_description" must be based on descriptive text actually present
+  near the event (light rewording/trimming for length is fine) - do not
+  synthesize a description from just the title, date, and location if no
+  such text exists. Leave it "" in that case rather than making one up.
 - Ignore generic site-navigation elements, such as a "browse other
   cities/locations" directory or menu, even if entries in it pair a place
   name with a short date fragment (e.g. "Next: Jul 8" or "Last: 1w ago").

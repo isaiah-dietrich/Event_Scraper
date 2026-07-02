@@ -61,8 +61,11 @@ def score_event(client: Anthropic, event: dict) -> dict:
         ("low"/"medium"/"high", or "" if missing/invalid), and "reason"
         (str).
     """
+    # default=str: "date" is a real datetime.datetime by the time an event
+    # reaches scoring (see cli.batch._filter_past_events), which the
+    # default JSON encoder can't serialize on its own.
     prompt = _SCORING_PROMPT_TEMPLATE.format(
-        criteria=SCORING_CRITERIA, event_json=json.dumps(event)
+        criteria=SCORING_CRITERIA, event_json=json.dumps(event, default=str)
     )
     response = client.messages.create(
         model=MODEL,

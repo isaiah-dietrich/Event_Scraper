@@ -1,3 +1,5 @@
+import datetime
+
 import pytest
 from openpyxl import load_workbook
 from openpyxl import Workbook
@@ -8,6 +10,7 @@ from utility.io_excel import _unique_sheet_title
 from utility.io_excel import _unique_table_name
 from utility.io_excel import append_rows
 from utility.io_excel import EVENTS_SHEET_NAME
+from utility.io_excel import OUTPUT_COLUMNS
 from utility.io_excel import OUTPUT_HEADERS
 from utility.io_excel import read_input_urls
 from utility.io_excel import REJECTED_SHEET_NAME
@@ -217,6 +220,55 @@ def test_append_rows_table_ref_grows_across_calls(tmp_path):
     assert second_ref == "A1:K3"
 
 
+# --- append_rows: real date values ---------------------------------------
+
+
+def test_append_rows_stores_real_datetime_as_an_actual_date_cell(tmp_path):
+    path = tmp_path / "out.xlsx"
+    row = _ok_row(title="Dated Event", date=datetime.datetime(2026, 10, 12))
+
+    append_rows(str(path), [row])
+
+    workbook = load_workbook(path)
+    date_column_index = OUTPUT_COLUMNS.index("date") + 1
+    cell = workbook[EVENTS_SHEET_NAME].cell(row=2, column=date_column_index)
+    assert cell.value == datetime.datetime(2026, 10, 12)
+    assert cell.number_format == "mmmm d, yyyy"
+
+
+def test_append_rows_dedupes_real_datetime_dates_across_reload(tmp_path):
+    # A real date value written in one append_rows call must still compare
+    # equal to a freshly-built datetime.datetime for the same day in a
+    # later call, even after a save/reload round-trip through openpyxl.
+    path = tmp_path / "out.xlsx"
+    row = _ok_row(
+        title="Repeat Dated Event",
+        date=datetime.datetime(2026, 10, 12),
+        source_url="https://x.com",
+    )
+
+    append_rows(str(path), [row])
+    append_rows(str(path), [row])
+
+    workbook = load_workbook(path)
+    events_rows = list(workbook[EVENTS_SHEET_NAME].iter_rows(min_row=2, values_only=True))
+    assert len(events_rows) == 1
+
+
+def test_append_rows_keeps_text_date_for_unparseable_dates(tmp_path):
+    # Blank/unparseable dates are kept as their original raw text (see
+    # cli.batch._filter_past_events) rather than forced into a date value.
+    path = tmp_path / "out.xlsx"
+    row = _ok_row(title="Weird Date Event", date="sometime next quarter")
+
+    append_rows(str(path), [row])
+
+    workbook = load_workbook(path)
+    date_column_index = OUTPUT_COLUMNS.index("date") + 1
+    cell = workbook[EVENTS_SHEET_NAME].cell(row=2, column=date_column_index)
+    assert cell.value == "sometime next quarter"
+
+
 # --- _sheet_title_from_url ---------------------------------------------
 
 
@@ -304,6 +356,19 @@ def test_write_per_site_sheets_uses_standard_headers(tmp_path):
     workbook = load_workbook(path)
     header = [cell.value for cell in workbook["a.example.com"][1]]
     assert header == OUTPUT_HEADERS
+
+
+def test_write_per_site_sheets_formats_date_column_as_date(tmp_path):
+    path = tmp_path / "by_site.xlsx"
+    row = _ok_row(date=datetime.datetime(2026, 10, 12))
+
+    write_per_site_sheets(str(path), {"https://a.example.com": [row]})
+
+    workbook = load_workbook(path)
+    date_column_index = OUTPUT_COLUMNS.index("date") + 1
+    cell = workbook["a.example.com"].cell(row=2, column=date_column_index)
+    assert cell.value == datetime.datetime(2026, 10, 12)
+    assert cell.number_format == "mmmm d, yyyy"
 
 
 def test_write_per_site_sheets_does_not_split_by_status_or_score(tmp_path):

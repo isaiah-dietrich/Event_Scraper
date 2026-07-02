@@ -56,6 +56,16 @@ _WRAP_COLUMN_WIDTH = 60
 _MAX_AUTOSIZE_WIDTH = 50
 _AUTOSIZE_PADDING = 2
 
+# A parsed event's "date" is a real datetime.datetime (always midnight; see
+# cli.batch._filter_past_events), so it sorts/filters correctly in Excel -
+# but openpyxl's default number format for datetimes includes a time
+# component, which would show a distracting "00:00:00" on every row. This
+# formats it as a calendar date instead. Applying it to every row in the
+# column is safe even for the text values kept for blank/unparseable
+# dates - Excel only applies a number format to actual numeric/date values,
+# so plain text cells just ignore it and display unchanged.
+_DATE_COLUMN_NUMBER_FORMAT = "mmmm d, yyyy"
+
 
 def read_input_urls(path: str) -> list[str]:
     """Reads site URLs from an input spreadsheet's first column.
@@ -154,6 +164,15 @@ def _autosize_columns(sheet, last_row: int) -> None:
         )
 
 
+def _apply_date_number_format(sheet, last_row: int) -> None:
+    """Formats the "date" column as a calendar date, not datetime-with-time."""
+    date_column_index = OUTPUT_COLUMNS.index("date") + 1
+    for row_number in range(2, last_row + 1):
+        sheet.cell(row=row_number, column=date_column_index).number_format = (
+            _DATE_COLUMN_NUMBER_FORMAT
+        )
+
+
 def _validate_header(sheet) -> None:
     """Raises if an existing sheet's header row doesn't match OUTPUT_HEADERS.
 
@@ -203,6 +222,7 @@ def _append_to_sheet(sheet, rows: list[dict], existing_keys: set) -> int:
 
     _apply_table(sheet, sheet.max_row)
     _autosize_columns(sheet, sheet.max_row)
+    _apply_date_number_format(sheet, sheet.max_row)
     return skipped_count
 
 
@@ -326,6 +346,7 @@ def write_per_site_sheets(path: str, rows_by_url: dict) -> None:
             sheet.append([row.get(column, "") for column in OUTPUT_COLUMNS])
         _apply_table(sheet, sheet.max_row, table_name=table_name)
         _autosize_columns(sheet, sheet.max_row)
+        _apply_date_number_format(sheet, sheet.max_row)
 
     if not workbook.sheetnames:
         workbook.create_sheet("No Sites")

@@ -94,12 +94,13 @@ def test_filter_past_events_keeps_events_dated_in_the_future():
     assert result[0]["title"] == "Future Event"
 
 
-def test_filter_past_events_normalizes_date_format():
+def test_filter_past_events_converts_date_to_real_datetime():
     events = [{"title": "Future Event", "date": "2099-03-07"}]
 
     result = batch._filter_past_events(events)
 
-    assert result[0]["date"] == "March 7, 2099"
+    assert result[0]["date"] == datetime.datetime(2099, 3, 7)
+    assert isinstance(result[0]["date"], datetime.datetime)
 
 
 def test_filter_past_events_keeps_events_with_empty_date():
@@ -129,8 +130,7 @@ def test_filter_past_events_yearless_date_resolves_to_future():
     result = batch._filter_past_events(events)
 
     assert len(result) == 1
-    resolved = datetime.datetime.strptime(result[0]["date"], "%B %d, %Y").date()
-    assert resolved >= datetime.date.today()
+    assert result[0]["date"].date() >= datetime.date.today()
 
 
 # --- _timestamp ------------------------------------------------------------
@@ -264,6 +264,25 @@ def test_process_site_scores_target_state_and_unknown_location_events(monkeypatc
         assert row["fit_score"] == 5
         assert row["confidence"] == "high"
         assert row["fit_reason"] == "great fit"
+
+
+def test_process_site_scores_event_with_real_score_event_and_real_date(monkeypatch, fake_client):
+    # Regression test: uses the *real* score_event (not mocked), so a
+    # future-dated event's "date" is a genuine datetime.datetime by the
+    # time it reaches scoring (see _filter_past_events) and must survive
+    # score_event's json.dumps(event) call rather than raising.
+    monkeypatch.setattr(batch, "fetch_rendered_html", lambda url: "<html>x</html>")
+    monkeypatch.setattr(batch, "reduce_html", lambda html: "some text")
+    ga_event = _stub_extraction_fields("GA Event", location="Atlanta, GA", date="January 1, 2099")
+    monkeypatch.setattr(batch, "extract_events", lambda client, page_text: [ga_event])
+
+    client = fake_client(['{"score": 4, "confidence": "high", "reason": "Solid fit."}'])
+
+    rows = batch.process_site(client=client, url="https://example.com")
+
+    assert len(rows) == 1
+    assert rows[0]["fit_score"] == 4
+    assert isinstance(rows[0]["date"], datetime.datetime)
 
 
 def test_process_site_mixes_auto_rejected_and_scored_rows(monkeypatch):
