@@ -1,3 +1,4 @@
+import datetime
 import json
 
 import pytest
@@ -100,3 +101,18 @@ def test_prompt_forbids_synthesizing_description_from_title_alone(fake_client):
     assert "short_description" in prompt
     assert "synthesize" in prompt.lower()
     assert "title, date, and location" in prompt.lower()
+
+
+def test_prompt_includes_todays_date(fake_client):
+    # Regression test: without the real date, the model has to guess a year
+    # for date text like "Wed, Jul 8" that omits one, and it guesses wrong -
+    # which _filter_past_events then takes literally, silently dropping
+    # every real event as "already past".
+    client = fake_client(["[]"])
+
+    extract_events(client, "some page text")
+
+    prompt = client.calls[0]["messages"][0]["content"]
+    today_str = datetime.date.today().strftime("%B %d, %Y")
+    assert today_str in prompt
+    assert "resolve it relative to today" in prompt.lower()

@@ -1,5 +1,6 @@
 """Extract stage: ask an LLM to pull structured events out of page text."""
 
+import datetime
 import json
 import re
 
@@ -21,6 +22,8 @@ _FENCE_START_PATTERN = re.compile(r"^```(?:json)?\s*")
 _FENCE_END_PATTERN = re.compile(r"\s*```$")
 
 _EXTRACTION_PROMPT_TEMPLATE = """\
+Today's date is {today}.
+
 You are given the visible text content of a webpage. This page may be a
 dedicated events calendar, or it may be a general site (company homepage, blog
 post, news article, etc.) that only mentions one or a few events in passing —
@@ -40,6 +43,10 @@ Rules:
   is_in_person).
 - "signup_link" should be the registration/details URL if present, else "".
 - Do not invent events that are not in the text.
+- If a date in the text has no year (e.g. "Wed, Jul 8", "Tuesday",
+  "Tomorrow"), resolve it relative to today's date above and pick the
+  nearest occurrence that is today or in the future, never a year that has
+  already passed. Do not guess or default to any other year.
 - "short_description" must be based on descriptive text actually present
   near the event (light rewording/trimming for length is fine) - do not
   synthesize a description from just the title, date, and location if no
@@ -75,7 +82,9 @@ def extract_events(client: Anthropic, page_text: str) -> list[dict]:
         ValueError: If the model's response is not a valid JSON array.
     """
     prompt = _EXTRACTION_PROMPT_TEMPLATE.format(
-        fields=", ".join(EXTRACTION_FIELDS), page_text=page_text
+        today=datetime.date.today().strftime("%B %d, %Y"),
+        fields=", ".join(EXTRACTION_FIELDS),
+        page_text=page_text,
     )
     response = client.messages.create(
         model=MODEL,

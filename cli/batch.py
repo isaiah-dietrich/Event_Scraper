@@ -41,11 +41,11 @@ TEST_URLS = [
     #"https://www.georgiamanufacturingalliance.com/events/",
     #"https://www.aimanufacturingconference.com/",
     #"https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
-    "https://luma.com/genai-collective",
+    #"https://luma.com/genai-collective",
     #"https://gec1.wildapricot.org/events",
-    #"https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events/?page=1",
-    #"https://atlanta.aitinkerers.org/"
-
+    "https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1"
+    #"https://atlanta.aitinkerers.org/",
+    #"https://www.meetup.com/atlbitlab/events/"
 ]
 
 # Each site gets its own browser instance and its own LLM call, run
