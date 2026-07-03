@@ -13,12 +13,21 @@ MODEL = "claude-haiku-4-5-20251001"
 # scoring prompt, so keep it as plain instructions for the model.
 SCORING_CRITERIA = """
 - If the event has zero mention of AI, machine learning, or automation, it is
-  an automatic 1 regardless of any other criteria.
+  an automatic 1 regardless of any other criteria. Judge this from the
+  event's own title/description, NOT from the org or calendar it was
+  scraped from - a generic membership orientation, networking mixer, or
+  "intro to X" session hosted by an AI-focused organization is still a 1 if
+  the event itself has no AI content.
 - In-person events in Georgia score highest.
 - Virtual-only events score 2 or below UNLESS they are clearly Georgia-focused
   or hosted by a Georgia institution (e.g. Georgia Tech, TAG, an Atlanta-based
   org). A national corporate webinar from Google, Microsoft, or similar scores
   1. A Georgia Tech or TAG virtual event scores 3-4.
+- If location is missing/blank, do NOT assume the event is virtual or
+  penalize it for ambiguous location - judge it on its AI content and other
+  known details instead. A known in-person AI conference (e.g. AIMST) should
+  score well even if a particular scraped listing for it lacks a location
+  field.
 - Educational AI events are good (technical talks, conferences, industry
   discussions on AI).
 - Pure paid AI training or events that are heavy-handed sales pitches for the
