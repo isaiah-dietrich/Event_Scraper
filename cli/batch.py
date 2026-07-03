@@ -36,16 +36,16 @@ PER_SITE_OUTPUT_PATH = "events_output_by_site.xlsx"
 # Paste site URLs here to test the pipeline without touching websites.xlsx.
 # Run with: python run.py --test
 TEST_URLS = [
-    #"https://ai.gatech.edu/events",
-    #"https://members.tagonline.org/calendar",
-    #"https://www.georgiamanufacturingalliance.com/events/",
-    #"https://www.aimanufacturingconference.com/",
-    #"https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
-    #"https://luma.com/genai-collective",
-    #"https://gec1.wildapricot.org/events",
+    "https://ai.gatech.edu/events",
+    "https://members.tagonline.org/calendar",
+    "https://www.georgiamanufacturingalliance.com/events/",
+    "https://www.aimanufacturingconference.com/",
+    "https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
+    "https://luma.com/genai-collective",
+    "https://gec1.wildapricot.org/events",
     "https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1"
-    #"https://atlanta.aitinkerers.org/",
-    #"https://www.meetup.com/atlbitlab/events/"
+    "https://atlanta.aitinkerers.org/",
+    "https://www.meetup.com/atlbitlab/events/"
 ]
 
 # Each site gets its own browser instance and its own LLM call, run
@@ -142,22 +142,113 @@ def _extract_us_state(location: str) -> str | None:
     return None
 
 
-def _split_by_state(events: list[dict]) -> tuple[list[dict], list[tuple[dict, str]]]:
-    """Splits events into (needs_scoring, auto_rejected) by location state.
+# Country names that appear as the trailing location segment (e.g. "Mumbai,
+# India") are auto-rejected the same way as a non-Georgia US state, since a
+# clearly-international event costs a scoring AI call for nothing. Not
+# exhaustive of all ~195 countries, just the ones worth covering. "Georgia"
+# is deliberately excluded - it collides with the US state of the same name
+# (see _extract_us_state), so an event genuinely in the country of Georgia
+# just falls through to normal AI scoring instead of being misclassified.
+_FOREIGN_COUNTRIES = {
+    "afghanistan", "albania", "algeria", "argentina", "armenia", "australia",
+    "austria", "azerbaijan", "bahrain", "bangladesh", "belarus", "belgium",
+    "bolivia", "bosnia and herzegovina", "brazil", "bulgaria", "cambodia",
+    "cameroon", "canada", "chile", "china", "colombia", "costa rica",
+    "croatia", "cuba", "cyprus", "czechia", "czech republic", "denmark",
+    "dominican republic", "ecuador", "egypt", "estonia", "ethiopia",
+    "finland", "france", "germany", "ghana", "greece", "guatemala",
+    "honduras", "hong kong", "hungary", "iceland", "india", "indonesia",
+    "iran", "iraq", "ireland", "israel", "italy", "jamaica", "japan",
+    "jordan", "kazakhstan", "kenya", "kuwait", "laos", "latvia", "lebanon",
+    "lithuania", "luxembourg", "malaysia", "malta", "mexico", "moldova",
+    "monaco", "mongolia", "morocco", "myanmar", "nepal", "netherlands",
+    "new zealand", "nicaragua", "nigeria", "north macedonia", "norway",
+    "oman", "pakistan", "panama", "paraguay", "peru", "philippines",
+    "poland", "portugal", "qatar", "romania", "russia", "rwanda",
+    "saudi arabia", "senegal", "serbia", "singapore", "slovakia",
+    "slovenia", "south africa", "south korea", "spain", "sri lanka",
+    "sweden", "switzerland", "taiwan", "tanzania", "thailand", "tunisia",
+    "turkey", "uganda", "ukraine", "united arab emirates", "united kingdom",
+    "uruguay", "uzbekistan", "venezuela", "vietnam", "zambia", "zimbabwe",
+}
+# Longest names first so e.g. "Czech Republic" isn't cut short by a
+# "Czechia" match starting at the same spot (not actually a substring
+# collision here, but kept consistent with _STATE_NAME_PATTERN's approach).
+_FOREIGN_COUNTRY_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(name) for name in sorted(_FOREIGN_COUNTRIES, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
 
-    An event is auto-rejected only when its location names a US state we can
-    confidently parse and that state isn't TARGET_STATE. Events with no
-    location, an unparseable location, or a non-US location are left in
-    needs_scoring so they still go through normal AI scoring.
+
+def _extract_foreign_country(location: str) -> str | None:
+    """Returns the non-US country named in a location string, if any.
+
+    Mirrors _extract_us_state's approach: the trailing comma-separated
+    segment (or the whole string, if there's no comma) is checked against
+    _FOREIGN_COUNTRIES. A bare, comma-less location must match exactly (so
+    a venue/org name that happens to contain a country's name isn't
+    misread - same reasoning as "Texas Roadhouse" not matching a state);
+    a trailing segment after a comma only needs to *contain* a country
+    name, so trailing text like "India (venue TBD)" still matches.
+
+    Returns None (rather than guessing) for anything not confidently a
+    named non-US country (e.g. "Virtual", a bare city, an ambiguous name)
+    so those events fall through to normal AI scoring instead of being
+    silently discarded.
+    """
+    if not location:
+        return None
+    raw_segments = location.split(",")
+    has_multiple_segments = len(raw_segments) > 1
+    for part in reversed([segment.strip() for segment in raw_segments]):
+        cleaned = re.sub(r"\d", "", part).strip()
+        if not cleaned or cleaned.lower() in _NOISE_LOCATION_SEGMENTS:
+            continue
+        if not has_multiple_segments:
+            return cleaned if cleaned.lower() in _FOREIGN_COUNTRIES else None
+        match = _FOREIGN_COUNTRY_PATTERN.search(cleaned)
+        return match.group(1) if match else None
+    return None
+
+
+def _split_by_state(events: list[dict]) -> tuple[list[dict], list[tuple[dict, str]]]:
+    """Splits events into (needs_scoring, auto_rejected) by location.
+
+    An event is auto-rejected, skipping the scoring AI call entirely, when
+    its location confidently names either a US state other than
+    TARGET_STATE (see _extract_us_state) or a non-US country (see
+    _extract_foreign_country) - either way it can't be Georgia. Events with
+    no location, an unparseable one, or one we can't confidently place
+    (e.g. "Virtual", "Zoom", a bare city name) are left in needs_scoring so
+    they still go through normal AI scoring rather than being silently
+    discarded on a guess.
+
+    Returns:
+        (needs_scoring, auto_rejected), where auto_rejected holds
+        (event, reason) pairs - `reason` is a ready-to-use sentence
+        explaining why that event was rejected without scoring.
     """
     needs_scoring = []
     auto_rejected = []
     for event in events:
-        state = _extract_us_state(event.get("location", ""))
+        location = event.get("location", "")
+        state = _extract_us_state(location)
         if state and state != TARGET_STATE:
-            auto_rejected.append((event, state))
-        else:
-            needs_scoring.append(event)
+            reason = (
+                f"Location is in {_STATE_ABBREVIATIONS[state]} ({state}), not "
+                f"{_STATE_ABBREVIATIONS[TARGET_STATE]}; auto-rejected without scoring."
+            )
+            auto_rejected.append((event, reason))
+            continue
+        country = _extract_foreign_country(location)
+        if country:
+            reason = (
+                f"Location is in {country}, not "
+                f"{_STATE_ABBREVIATIONS[TARGET_STATE]}, USA; auto-rejected without scoring."
+            )
+            auto_rejected.append((event, reason))
+            continue
+        needs_scoring.append(event)
     return needs_scoring, auto_rejected
 
 
@@ -238,15 +329,12 @@ def process_site(client: Anthropic, url: str) -> list[dict]:
     events_to_score, auto_rejected = _split_by_state(events)
 
     rows = []
-    for event, state in auto_rejected:
+    for event, reason in auto_rejected:
         row = {**base_row, "status": "ok"}
         row.update({field: event.get(field, "") for field in EXTRACTION_FIELDS})
         row["fit_score"] = 1
         row["confidence"] = "high"
-        row["fit_reason"] = (
-            f"Location is in {_STATE_ABBREVIATIONS[state]} ({state}), not "
-            f"{_STATE_ABBREVIATIONS[TARGET_STATE]}; auto-rejected without scoring."
-        )
+        row["fit_reason"] = reason
         rows.append(row)
 
     if events_to_score:

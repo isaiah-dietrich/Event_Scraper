@@ -116,3 +116,20 @@ def test_prompt_includes_todays_date(fake_client):
     today_str = datetime.date.today().strftime("%B %d, %Y")
     assert today_str in prompt
     assert "resolve it relative to today" in prompt.lower()
+
+
+def test_prompt_infers_location_from_title_when_venue_is_hidden(fake_client):
+    # Regression test: a page that hides the exact venue behind a
+    # placeholder like "Register to See Location" shouldn't leave
+    # "location" blank/ambiguous when the title/description names a state
+    # outright (e.g. "... at Florida Atlantic University") - otherwise our
+    # deterministic non-Georgia location filter never gets a chance to
+    # auto-reject it, and it falls entirely on AI scoring to catch (which
+    # may only do so at low confidence, keeping it visible in Events).
+    client = fake_client(["[]"])
+
+    extract_events(client, "some page text")
+
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "Register to" in prompt and "See Location" in prompt
+    assert "Texas Roadhouse" in prompt  # guardrail against brand-name false positives

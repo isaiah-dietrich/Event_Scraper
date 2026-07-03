@@ -60,6 +60,14 @@ Rules:
 - Only extract events that belong to this page's own subject; do not pull
   in events for other cities/locations that are merely linked to from a
   "browse other cities" directory elsewhere on the page.
+- If the exact venue isn't disclosed (e.g. a placeholder like "Register to
+  See Location", or no address given at all), but the event's own title or
+  description clearly states the city, state, or region it's actually
+  happening in (e.g. "... at Florida Atlantic University"), use that as
+  "location" instead of leaving it blank or as the placeholder text. Do not
+  infer a location from a business/organization name that merely contains
+  a place name (e.g. "Texas Roadhouse", "Washington Mutual Bank") - that's
+  a brand name, not a stated event location.
 - If the page does not mention any events at all, return an empty JSON
   array [].
 

@@ -43,6 +43,37 @@ def test_extract_us_state(location, expected):
     assert batch._extract_us_state(location) == expected
 
 
+# --- _extract_foreign_country -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "location,expected",
+    [
+        ("Mumbai, India", "India"),
+        ("Islamabad, Pakistan", "Pakistan"),
+        ("Singapore", "Singapore"),
+        ("Toronto, Canada", "Canada"),
+        ("Hlavní město Praha, Czechia", "Czechia"),
+        ("Nairobi, Kenya", "Kenya"),
+        ("Wien, Austria", "Austria"),
+        ("Adelaide, Australia", "Australia"),
+        ("Barcelona, Spain (venue TBD)", "Spain"),
+        # No confident non-US country: kept for AI scoring rather than
+        # guessed at.
+        ("Atlanta, GA", None),
+        ("Atlanta, Georgia", None),  # US state, not the country
+        ("Virtual", None),
+        ("Zoom", None),
+        ("Google Meet", None),
+        ("Register to See Location", None),
+        ("France Cafe", None),  # brand name, not a comma-separated country
+        ("", None),
+    ],
+)
+def test_extract_foreign_country(location, expected):
+    assert batch._extract_foreign_country(location) == expected
+
+
 # --- _split_by_state -----------------------------------------------------
 
 
@@ -55,7 +86,27 @@ def test_split_by_state_routes_non_target_state_to_auto_rejected():
     needs_scoring, auto_rejected = batch._split_by_state(events)
 
     assert needs_scoring == [events[1]]
-    assert auto_rejected == [(events[0], "TX")]
+    assert len(auto_rejected) == 1
+    rejected_event, reason = auto_rejected[0]
+    assert rejected_event == events[0]
+    assert "Texas" in reason
+    assert "auto-rejected" in reason
+
+
+def test_split_by_state_routes_foreign_country_to_auto_rejected():
+    events = [
+        {"title": "India Event", "location": "Mumbai, India"},
+        {"title": "Georgia Event", "location": "Atlanta, GA"},
+    ]
+
+    needs_scoring, auto_rejected = batch._split_by_state(events)
+
+    assert needs_scoring == [events[1]]
+    assert len(auto_rejected) == 1
+    rejected_event, reason = auto_rejected[0]
+    assert rejected_event == events[0]
+    assert "India" in reason
+    assert "auto-rejected" in reason
 
 
 def test_split_by_state_keeps_unknown_location_for_scoring():
@@ -238,6 +289,32 @@ def test_process_site_auto_rejects_non_target_state_without_scoring_call(monkeyp
     assert row["fit_score"] == 1
     assert row["confidence"] == "high"
     assert "Texas" in row["fit_reason"]
+    assert "auto-rejected" in row["fit_reason"]
+
+
+def test_process_site_auto_rejects_foreign_country_without_scoring_call(monkeypatch):
+    monkeypatch.setattr(batch, "fetch_rendered_html", lambda url: "<html>x</html>")
+    monkeypatch.setattr(batch, "reduce_html", lambda html: "some text")
+    foreign_event = _stub_extraction_fields(
+        "India Event", location="Mumbai, India", date="January 1, 2099"
+    )
+    monkeypatch.setattr(batch, "extract_events", lambda client, page_text: [foreign_event])
+
+    score_calls = []
+    monkeypatch.setattr(
+        batch, "score_event", lambda client, event: score_calls.append(event) or {}
+    )
+
+    rows = batch.process_site(client=object(), url="https://example.com")
+
+    assert score_calls == []
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["status"] == "ok"
+    assert row["title"] == "India Event"
+    assert row["fit_score"] == 1
+    assert row["confidence"] == "high"
+    assert "India" in row["fit_reason"]
     assert "auto-rejected" in row["fit_reason"]
 
 
