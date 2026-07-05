@@ -109,7 +109,9 @@ def extract_events(client: Anthropic, page_text: str) -> list[dict]:
 
 
 def _parse_json_array(raw_text: str) -> list[dict]:
-    """Parses model output as a JSON array, tolerating stray code fences.
+    """Parses model output as a JSON array, tolerating stray code fences and
+    prose the model added before/after the array despite being told not to
+    (e.g. "Looking at the calendar, I can see two events: [...]").
 
     Args:
         raw_text: The model's raw response text.
@@ -118,16 +120,38 @@ def _parse_json_array(raw_text: str) -> list[dict]:
         The parsed list of event dicts.
 
     Raises:
-        ValueError: If the text is not valid JSON, or not a JSON array.
+        ValueError: If no JSON array can be found in the text, or the parsed
+            value isn't a list.
     """
     cleaned = _FENCE_START_PATTERN.sub("", raw_text.strip())
     cleaned = _FENCE_END_PATTERN.sub("", cleaned)
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError as error:
-        raise ValueError(
-            f"Model did not return valid JSON: {error}\nRaw output:\n{raw_text[:1000]}"
-        ) from error
+        data = _find_json_array(cleaned)
+        if data is None:
+            raise ValueError(
+                f"Model did not return valid JSON: {error}\nRaw output:\n{raw_text[:1000]}"
+            ) from error
     if not isinstance(data, list):
         raise ValueError(f"Expected a JSON array of events, got: {type(data)}")
     return data
+
+
+def _find_json_array(text: str) -> list | None:
+    """Locates and parses a JSON array embedded anywhere in text, ignoring
+    any surrounding prose.
+
+    Tries each "[" in turn (not just the first) since an earlier one isn't
+    guaranteed to start the real array - e.g. a stray "[1]"-style citation
+    mentioned in prose before it.
+    """
+    decoder = json.JSONDecoder()
+    start = text.find("[")
+    while start != -1:
+        try:
+            data, _ = decoder.raw_decode(text, start)
+            return data
+        except json.JSONDecodeError:
+            start = text.find("[", start + 1)
+    return None

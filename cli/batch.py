@@ -36,16 +36,15 @@ PER_SITE_OUTPUT_PATH = "events_output_by_site.xlsx"
 # Paste site URLs here to test the pipeline without touching websites.xlsx.
 # Run with: python run.py --test
 TEST_URLS = [
-    "https://ai.gatech.edu/events",
-    "https://members.tagonline.org/calendar",
-    "https://www.georgiamanufacturingalliance.com/events/",
-    "https://www.aimanufacturingconference.com/",
+    #"https://ai.gatech.edu/events",
+    #"https://members.tagonline.org/calendar",
+    #"https://www.georgiamanufacturingalliance.com/events/",
+    #"https://www.aimanufacturingconference.com/",
     "https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
-    "https://luma.com/genai-collective",
-    "https://gec1.wildapricot.org/events",
-    "https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1"
-    "https://atlanta.aitinkerers.org/",
-    "https://www.meetup.com/atlbitlab/events/"
+    #"https://luma.com/genai-collective",
+    #"https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1"
+    #"https://atlanta.aitinkerers.org/",
+    #"https://www.meetup.com/atlbitlab/events/"
 ]
 
 # Each site gets its own browser instance and its own LLM call, run
@@ -252,14 +251,26 @@ def _split_by_state(events: list[dict]) -> tuple[list[dict], list[tuple[dict, st
     return needs_scoring, auto_rejected
 
 
-def _filter_past_events(events: list[dict]) -> list[dict]:
-    """Drops events dated before today; keeps events with unparseable dates.
+def _parse_event_date(date_str: str) -> datetime.datetime | None:
+    """Parses a free-text event date string, preferring future occurrences.
 
     Uses PREFER_DATES_FROM="future" so a yearless date like "January 10"
     scraped in June resolves to next January rather than the one already
-    passed. Events whose date can't be parsed at all are kept (rather than
-    dropped) so an unusual format doesn't silently lose a real event, but a
-    warning is logged so bad formats are visible instead of silent.
+    passed. Returns None (rather than raising) for blank/unparseable input,
+    so callers can decide how to handle that case themselves.
+    """
+    date_str = (date_str or "").strip()
+    if not date_str:
+        return None
+    return dateparser.parse(date_str, settings=_DATE_PARSER_SETTINGS)
+
+
+def _filter_past_events(events: list[dict]) -> list[dict]:
+    """Drops events dated before today; keeps events with unparseable dates.
+
+    Events whose date can't be parsed at all are kept (rather than dropped)
+    so an unusual format doesn't silently lose a real event, but a warning
+    is logged so bad formats are visible instead of silent.
 
     A successfully parsed event's "date" is replaced with a real
     datetime.datetime (not a formatted string), so it's written to the
@@ -277,7 +288,7 @@ def _filter_past_events(events: list[dict]) -> list[dict]:
         if not date_str:
             filtered.append(event)
             continue
-        parsed = dateparser.parse(date_str, settings=_DATE_PARSER_SETTINGS)
+        parsed = _parse_event_date(date_str)
         if parsed is None:
             print(f"  [warn] could not parse event date {date_str!r} "
                   f"for {event.get('title', 'Untitled')!r}; keeping it")
@@ -394,7 +405,9 @@ def main() -> None:
     all_rows = []
     rows_by_url = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_url = {executor.submit(process_site, client, url): url for url in urls}
+        future_to_url = {
+            executor.submit(process_site, client, url): url for url in urls
+        }
         for future in as_completed(future_to_url):
             url = future_to_url[future]
             try:

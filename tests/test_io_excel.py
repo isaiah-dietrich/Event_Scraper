@@ -203,6 +203,35 @@ def test_append_rows_raises_on_mismatched_existing_header(tmp_path):
 # --- append_rows: table grows across calls --------------------------------
 
 
+def test_append_rows_creates_no_table_for_a_sheet_with_zero_data_rows(tmp_path):
+    # A table ref spanning only the header row (e.g. "A1:K1") is invalid per
+    # the Excel table spec and gets stripped out with a repair warning on
+    # open - this run's only row is "ok", so Rejected Events ends up with
+    # zero data rows and must not get a table at all.
+    path = tmp_path / "out.xlsx"
+
+    append_rows(str(path), [_ok_row(fit_score=4, confidence="high")])
+
+    workbook = load_workbook(path)
+    assert dict(workbook[REJECTED_SHEET_NAME].tables) == {}
+    assert len(dict(workbook[EVENTS_SHEET_NAME].tables)) == 1
+
+
+def test_append_rows_creates_table_once_a_sheet_gets_its_first_row(tmp_path):
+    # First call leaves Rejected Events empty (no table yet); second call
+    # adds its first rejected row and should create the table then.
+    path = tmp_path / "out.xlsx"
+    append_rows(str(path), [_ok_row(title="Good Event", fit_score=4, confidence="high")])
+
+    append_rows(str(path), [_ok_row(title="Bad Event", fit_score=1, confidence="high")])
+
+    workbook = load_workbook(path)
+    rejected_tables = dict(workbook[REJECTED_SHEET_NAME].tables)
+    assert len(rejected_tables) == 1
+    table_name = next(iter(rejected_tables))
+    assert rejected_tables[table_name].ref == "A1:K2"
+
+
 def test_append_rows_table_ref_grows_across_calls(tmp_path):
     path = tmp_path / "out.xlsx"
     append_rows(str(path), [_ok_row(title="One", date="July 1, 2026")])

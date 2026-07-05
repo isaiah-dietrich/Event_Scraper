@@ -15,6 +15,8 @@ class FakePage:
         content_by_url=None,
         scroll_heights=None,
         viewport_height=800,
+        has_next_month_button=False,
+        month_titles=None,
     ):
         """content_sequence, if given, is returned one entry per content()
         call (holding on the last entry once exhausted) instead of the
@@ -33,6 +35,18 @@ class FakePage:
         Defaults to a constant 1000, comfortably above the default
         viewport_height so scrolling is attempted unless a test says
         otherwise.
+
+        has_next_month_button, if True, simulates a FullCalendar-style page
+        with a ".fc-next-button" - used to test month-by-month calendar
+        navigation (_click_next_month_and_collect_snapshots). Defaults to
+        False (no such button), matching most sites.
+
+        month_titles, if given, is returned one entry per
+        ".fc-toolbar-title" read, advancing one step every time the "next
+        month" button is clicked (holding on the last entry once
+        exhausted) - used to control whether a click should be treated as
+        having reached a new month (title changes) or not (title repeats,
+        signaling no further months).
         """
         self._html = html
         self._goto_error = goto_error
@@ -40,6 +54,9 @@ class FakePage:
         self._content_by_url = content_by_url
         self._scroll_heights = list(scroll_heights) if scroll_heights is not None else None
         self._viewport_height = viewport_height
+        self._has_next_month_button = has_next_month_button
+        self._month_titles = list(month_titles) if month_titles is not None else None
+        self._month_title_index = 0
         self.goto_calls = []
         self.wait_for_timeout_calls = []
         self.evaluate_calls = []
@@ -75,6 +92,16 @@ class FakePage:
             return self._scroll_heights[index]
         if script == "window.innerHeight":
             return self._viewport_height
+        if fetch_module._FC_NEXT_BUTTON_SELECTOR in script:
+            if ".click()" in script:
+                self._month_title_index += 1
+                return None
+            return self._has_next_month_button
+        if fetch_module._FC_TOOLBAR_TITLE_SELECTOR in script:
+            if self._month_titles is None:
+                return None
+            index = min(self._month_title_index, len(self._month_titles) - 1)
+            return self._month_titles[index]
         return None
 
 
@@ -210,6 +237,32 @@ def test_no_extra_snapshot_when_scrolling_finds_nothing_new(monkeypatch):
     # Default FakePage has a constant scroll height (nothing more to load),
     # so the result shouldn't be needlessly duplicated with an identical
     # scroll-step snapshot.
+    page = FakePage()
+    _install_fake_playwright(monkeypatch, page)
+
+    result = fetch_rendered_html("https://example.com")
+
+    assert result == "<html>rendered</html>"
+
+
+def test_clicks_through_months_to_load_more_content_before_returning(monkeypatch):
+    # A FullCalendar-style page that advances one real month before
+    # plateauing: proves the month-click step is wired into the full fetch
+    # flow (and its snapshot combined into the final result), not just
+    # unit-testable in isolation.
+    page = FakePage(has_next_month_button=True, month_titles=["July 2026", "August 2026"])
+    _install_fake_playwright(monkeypatch, page)
+
+    result = fetch_rendered_html("https://example.com")
+
+    # One snapshot from the initial settle, plus one appended for the
+    # single real month advance.
+    assert result.count("<html>rendered</html>") == 2
+
+
+def test_no_extra_snapshot_when_page_has_no_next_month_button(monkeypatch):
+    # Default FakePage has no ".fc-next-button" (most sites), so nothing
+    # should be clicked or appended.
     page = FakePage()
     _install_fake_playwright(monkeypatch, page)
 
@@ -410,6 +463,68 @@ def test_scroll_continues_normally_when_content_is_within_future_cutoff():
 
     assert _scroll_to_call_count(page) == 2
     assert snapshots == [near_future_html]
+
+
+# --- _click_next_month_and_collect_snapshots (unit-level) ------------------
+
+
+def test_month_click_skips_entirely_when_no_next_button():
+    # Most sites aren't a FullCalendar-style month view - nothing to click.
+    page = FakePage()
+
+    snapshots = fetch_module._click_next_month_and_collect_snapshots(page)
+
+    assert snapshots == []
+    assert page.wait_for_timeout_calls == []
+
+
+def test_month_click_captures_one_snapshot_per_month_then_stops():
+    # Title advances once (July -> August), then plateaus - should click
+    # twice (the second click is what confirms no further month) but only
+    # capture one snapshot, for the month that actually changed.
+    page = FakePage(has_next_month_button=True, month_titles=["July 2026", "August 2026"])
+
+    snapshots = fetch_module._click_next_month_and_collect_snapshots(page)
+
+    assert snapshots == ["<html>rendered</html>"]
+
+
+def test_month_click_captures_nothing_when_title_never_changes():
+    # A calendar with no further months (or one whose "next" button is a
+    # no-op) - a single click attempt confirms nothing more to load.
+    page = FakePage(has_next_month_button=True, month_titles=["July 2026"])
+
+    snapshots = fetch_module._click_next_month_and_collect_snapshots(page)
+
+    assert snapshots == []
+
+
+def test_month_click_gives_up_after_max_attempts_when_always_advancing():
+    # A calendar with an effectively unbounded number of future months -
+    # every click reaches a new one, so it must not click forever.
+    titles = [f"Month {n}" for n in range(fetch_module._MAX_MONTH_CLICKS + 2)]
+    page = FakePage(has_next_month_button=True, month_titles=titles)
+
+    snapshots = fetch_module._click_next_month_and_collect_snapshots(page)
+
+    assert len(snapshots) == fetch_module._MAX_MONTH_CLICKS
+
+
+def test_month_click_stops_but_keeps_snapshot_once_beyond_future_cutoff():
+    # This pipeline runs weekly, so clicking deep into the future isn't
+    # worth it - once a month's content is entirely beyond _MAX_FUTURE_DAYS
+    # out, stop clicking *further*. The snapshot that crossed the cutoff is
+    # still kept, though.
+    far_future = datetime.date.today() + datetime.timedelta(days=200)
+    far_future_html = f"<html><body>Event on {far_future:%B %d, %Y}</body></html>"
+    titles = [f"Month {n}" for n in range(fetch_module._MAX_MONTH_CLICKS + 2)]
+    page = FakePage(
+        has_next_month_button=True, month_titles=titles, content_sequence=[far_future_html]
+    )
+
+    snapshots = fetch_module._click_next_month_and_collect_snapshots(page)
+
+    assert snapshots == [far_future_html]
 
 
 # --- _is_beyond_future_cutoff (unit-level) ---------------------------------

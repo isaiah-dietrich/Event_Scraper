@@ -19,6 +19,10 @@ TABLE_STYLE = "TableStyleMedium2"  # Built-in blue header, white/light-blue band
 EVENTS_SHEET_NAME = "Events"
 REJECTED_SHEET_NAME = "Rejected Events"
 
+# Statuses whose rows participate in cross-run dedupe (see _event_key,
+# _existing_event_keys, _append_to_sheet).
+_DEDUPE_STATUSES = {"ok"}
+
 # Internal row keys, in the order they should appear in each sheet.
 OUTPUT_COLUMNS = [
     "title",
@@ -105,7 +109,8 @@ def _event_key(row: dict) -> tuple:
 
 
 def _existing_event_keys(sheet) -> set:
-    """Collects dedupe keys for every "ok" event row already in the sheet."""
+    """Collects dedupe keys for every dedupe-eligible row already in the
+    sheet (see _DEDUPE_STATUSES)."""
     status_index = OUTPUT_COLUMNS.index("status")
     source_url_index = OUTPUT_COLUMNS.index("source_url")
     title_index = OUTPUT_COLUMNS.index("title")
@@ -113,7 +118,7 @@ def _existing_event_keys(sheet) -> set:
 
     keys = set()
     for row in sheet.iter_rows(min_row=2, values_only=True):
-        if not row or row[status_index] != "ok":
+        if not row or row[status_index] not in _DEDUPE_STATUSES:
             continue
         keys.add((row[source_url_index] or "", row[title_index] or "", row[date_index] or ""))
     return keys
@@ -126,7 +131,18 @@ def _apply_table(sheet, last_row: int, table_name: str | None = None) -> None:
     fixed "Events"/"Rejected Events" titles), but callers with less
     predictable, non-identifier-safe titles (e.g. one sheet per site URL)
     should pass an already-sanitized, workbook-unique name explicitly.
+
+    Does nothing if the sheet has no data rows yet (last_row < 2, i.e. only
+    the header). A table ref spanning just the header row (e.g. "A1:K1") is
+    structurally invalid per the Excel table spec, which requires at least
+    one row below the header - writing one anyway doesn't error in openpyxl,
+    but Excel flags the file as corrupt on open and silently strips the
+    Table/AutoFilter out during its repair. This routinely happened on the
+    "Rejected Events" sheet whenever a run produced zero rejected rows. The
+    table gets created on a later run once the sheet has its first real row.
     """
+    if last_row < 2:
+        return
     if table_name is None:
         table_name = sheet.title.replace(" ", "") + "Table"
     last_column_letter = get_column_letter(len(OUTPUT_COLUMNS))
@@ -203,15 +219,16 @@ def _get_or_create_sheet(workbook, title: str):
 
 
 def _append_to_sheet(sheet, rows: list[dict], existing_keys: set) -> int:
-    """Appends rows to one sheet, skipping "ok" rows already in existing_keys.
+    """Appends rows to one sheet, skipping dedupe-eligible rows (see
+    _DEDUPE_STATUSES) already in existing_keys.
 
-    Mutates existing_keys with the key of every "ok" row actually written,
-    so a single key set can be shared across sheets to prevent the same
-    event ending up duplicated in both Events and Rejected Events.
+    Mutates existing_keys with the key of every dedupe-eligible row actually
+    written, so a single key set can be shared across sheets to prevent the
+    same event ending up duplicated across Events and Rejected Events.
     """
     skipped_count = 0
     for row in rows:
-        if row.get("status") == "ok":
+        if row.get("status") in _DEDUPE_STATUSES:
             key = _event_key(row)
             if key in existing_keys:
                 skipped_count += 1
@@ -229,11 +246,11 @@ def _append_to_sheet(sheet, rows: list[dict], existing_keys: set) -> int:
 def append_rows(path: str, rows: list[dict]) -> None:
     """Appends result rows to a master output spreadsheet.
 
-    Creates the spreadsheet with an "Events" sheet and a "Rejected Events"
-    sheet if it does not already exist. A scored event is routed to
-    Rejected Events if the model gave it fit_score 1 with high confidence;
-    everything else (including non-"ok" failure/no_events rows) goes to
-    Events. Rows with status "ok" are skipped if a row with the same
+    Creates the spreadsheet with "Events" and "Rejected Events" sheets if
+    they do not already exist. A scored event is routed to Rejected Events
+    if the model gave it fit_score 1 with high confidence, and everything
+    else (including non-"ok" failure/no_events rows) goes to Events. Dedupe-
+    eligible rows (see _DEDUPE_STATUSES) are skipped if a row with the same
     source_url, title, and date is already present in either sheet, so
     re-running the batch over the same sites does not duplicate events or
     let one flip between sheets across runs.

@@ -57,6 +57,22 @@ def test_raises_value_error_on_truncated_response(fake_client):
         extract_events(client, "page text")
 
 
+def test_tolerates_leading_prose_before_json_array(fake_client):
+    # Regression test: the model sometimes ignores the "no prose" rule and
+    # prefaces the array with an explanation (observed on the calendar-scrape
+    # step in production), with no code fence to key off of.
+    events = [_event(title="AI Builders #19: Lunch & Learn", date="2026-07-01")]
+    raw = (
+        "Looking at the calendar, I can see one event in July 2026:\n\n"
+        f"{json.dumps(events)}"
+    )
+    client = fake_client([raw])
+
+    result = extract_events(client, "page text")
+
+    assert result == events
+
+
 def test_raises_value_error_on_invalid_json(fake_client):
     client = fake_client(["this is not json"])
 

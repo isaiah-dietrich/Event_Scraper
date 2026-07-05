@@ -184,6 +184,24 @@ def test_filter_past_events_yearless_date_resolves_to_future():
     assert result[0]["date"].date() >= datetime.date.today()
 
 
+# --- _parse_event_date -----------------------------------------------------
+
+
+def test_parse_event_date_parses_valid_date():
+    parsed = batch._parse_event_date("2099-03-07")
+
+    assert parsed == datetime.datetime(2099, 3, 7)
+
+
+def test_parse_event_date_returns_none_for_blank():
+    assert batch._parse_event_date("") is None
+    assert batch._parse_event_date(None) is None
+
+
+def test_parse_event_date_returns_none_for_unparseable():
+    assert batch._parse_event_date("not a real date at all") is None
+
+
 # --- _timestamp ------------------------------------------------------------
 
 
@@ -433,7 +451,9 @@ def test_main_test_mode_uses_test_urls_and_removes_existing_output(monkeypatch, 
     monkeypatch.setattr(batch, "TEST_OUTPUT_PATH", str(output_path))
     monkeypatch.setattr(batch, "TEST_URLS", ["https://only-test-site.example.com"])
     monkeypatch.setattr(
-        batch, "process_site", lambda client, url: [{"status": "ok", "title": "T", "source_url": url}]
+        batch,
+        "process_site",
+        lambda client, url: [{"status": "ok", "title": "T", "source_url": url}],
     )
 
     appended = {}
@@ -461,7 +481,9 @@ def test_main_aggregates_rows_from_all_urls(monkeypatch, tmp_path):
     monkeypatch.setattr(
         batch,
         "process_site",
-        lambda client, url: [{"status": "ok", "title": f"Event for {url}", "source_url": url}],
+        lambda client, url: [
+            {"status": "ok", "title": f"Event for {url}", "source_url": url}
+        ],
     )
 
     appended = {}
@@ -510,7 +532,9 @@ def test_main_per_site_mode_writes_one_sheet_per_url_instead_of_append_rows(monk
     monkeypatch.setattr(
         batch,
         "process_site",
-        lambda client, url: [{"status": "ok", "title": f"Event for {url}", "source_url": url}],
+        lambda client, url: [
+            {"status": "ok", "title": f"Event for {url}", "source_url": url}
+        ],
     )
 
     append_calls = []
@@ -543,7 +567,9 @@ def test_main_per_site_mode_does_not_touch_normal_output_path(monkeypatch, tmp_p
     monkeypatch.setattr(batch, "read_input_urls", lambda path: ["https://a.example.com"])
     monkeypatch.setattr(batch, "OUTPUT_PATH", str(normal_output))
     monkeypatch.setattr(batch, "PER_SITE_OUTPUT_PATH", str(tmp_path / "by_site.xlsx"))
-    monkeypatch.setattr(batch, "process_site", lambda client, url: [{"status": "no_events"}])
+    monkeypatch.setattr(
+        batch, "process_site", lambda client, url: [{"status": "no_events"}]
+    )
     monkeypatch.setattr(batch, "write_per_site_sheets", lambda path, rows_by_url: None)
 
     batch.main()
@@ -560,7 +586,9 @@ def test_main_per_site_mode_combines_with_test_mode(monkeypatch, tmp_path):
     monkeypatch.setattr(batch, "TEST_URLS", ["https://only-test-site.example.com"])
     monkeypatch.setattr(batch, "PER_SITE_OUTPUT_PATH", str(tmp_path / "by_site.xlsx"))
     monkeypatch.setattr(
-        batch, "process_site", lambda client, url: [{"status": "ok", "title": "T", "source_url": url}]
+        batch,
+        "process_site",
+        lambda client, url: [{"status": "ok", "title": "T", "source_url": url}],
     )
 
     per_site_calls = []

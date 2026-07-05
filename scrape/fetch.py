@@ -38,6 +38,21 @@ _SCROLL_WAIT_MS = 1_000  # time to let a scroll's newly-loaded content render
 _MAX_FUTURE_DAYS = 60  # ~2 months
 _DATE_SEARCH_SETTINGS = {"PREFER_DATES_FROM": "future"}
 
+# Month-by-month calendar navigation: some calendars (e.g. FullCalendar,
+# https://fullcalendar.io - identified by its own ".fc-next-button"/
+# ".fc-toolbar-title" class names, a stable third-party convention rather
+# than a per-site guess) render only one month at a time entirely
+# client-side, with no URL or scroll position to key off of - so a single
+# page load only ever sees whichever month opens by default (usually the
+# current one). See _click_next_month_and_collect_snapshots.
+_FC_NEXT_BUTTON_SELECTOR = ".fc-next-button"
+_FC_TOOLBAR_TITLE_SELECTOR = ".fc-toolbar-title"
+
+# Cut short earlier in the common case by _is_beyond_future_cutoff; this is
+# just a hard ceiling for when that never trips (e.g. an empty/malformed
+# toolbar title).
+_MAX_MONTH_CLICKS = 3
+
 # Numbered-page pagination (e.g. Eventbrite's "?page=1"): follow up to this
 # many pages beyond the one given, in addition to whatever a single page's
 # own scrolling reveals. Deliberately a flat cap rather than "stop once a
@@ -152,6 +167,45 @@ def _scroll_and_collect_snapshots(page) -> list[str]:
     return snapshots
 
 
+def _click_next_month_and_collect_snapshots(page) -> list[str]:
+    """Clicks a FullCalendar-style "next month" button repeatedly, capturing
+    an HTML snapshot each time it actually advances to a new month.
+
+    Skips entirely if the page has no _FC_NEXT_BUTTON_SELECTOR - this only
+    recognizes FullCalendar's specific markup, not a generic "find and click
+    arrows" heuristic (same spirit as _page_urls_to_follow only recognizing
+    one URL pagination convention rather than guessing at others). Stops
+    once a click doesn't change _FC_TOOLBAR_TITLE_SELECTOR's text (nothing
+    further to reach), once a step's content is entirely beyond
+    _MAX_FUTURE_DAYS out (see _is_beyond_future_cutoff - same reasoning as
+    _scroll_and_collect_snapshots), or after _MAX_MONTH_CLICKS regardless.
+    """
+    has_next_button = page.evaluate(
+        f"!!document.querySelector('{_FC_NEXT_BUTTON_SELECTOR}')"
+    )
+    if not has_next_button:
+        return []
+
+    def _toolbar_title():
+        return page.evaluate(
+            f"document.querySelector('{_FC_TOOLBAR_TITLE_SELECTOR}')?.textContent?.trim() ?? null"
+        )
+
+    snapshots = []
+    previous_title = _toolbar_title()
+    for _ in range(_MAX_MONTH_CLICKS):
+        page.evaluate(f"document.querySelector('{_FC_NEXT_BUTTON_SELECTOR}').click()")
+        html = _wait_for_content_to_settle(page)
+        current_title = _toolbar_title()
+        if current_title == previous_title:
+            break
+        snapshots.append(html)
+        previous_title = current_title
+        if _is_beyond_future_cutoff(html):
+            break
+    return snapshots
+
+
 def _page_urls_to_follow(url: str) -> list[str]:
     """Returns [url] plus up to _MAX_ADDITIONAL_PAGES follow-up URLs with an
     incremented "page" query parameter, if `url` has one to increment.
@@ -185,11 +239,13 @@ def _page_urls_to_follow(url: str) -> list[str]:
 
 def _load_and_capture(page, url: str) -> str:
     """Navigates to `url` and returns its settled HTML plus any additional
-    content pulled in by scrolling (see _wait_for_content_to_settle and
-    _scroll_and_collect_snapshots)."""
+    content pulled in by scrolling or month-by-month calendar navigation
+    (see _wait_for_content_to_settle, _scroll_and_collect_snapshots, and
+    _click_next_month_and_collect_snapshots)."""
     page.goto(url, wait_until="domcontentloaded", timeout=_GOTO_TIMEOUT_MS)
     first_snapshot = _wait_for_content_to_settle(page)
     more_snapshots = _scroll_and_collect_snapshots(page)
+    more_snapshots += _click_next_month_and_collect_snapshots(page)
     return "\n".join([first_snapshot] + more_snapshots)
 
 
@@ -200,7 +256,8 @@ def fetch_rendered_html(url: str) -> str:
     Runs Chromium non-headless with a realistic user agent, since some
     sites (e.g. those behind Cloudflare) detect and block headless
     automation outright. See _load_and_capture for how a single page is
-    loaded and settled, and _page_urls_to_follow for how additional
+    loaded and settled (including scrolling and FullCalendar-style
+    month-by-month navigation), and _page_urls_to_follow for how additional
     numbered pages (e.g. Eventbrite's "?page=1", "?page=2", ...) are
     detected and queued up alongside it.
 
