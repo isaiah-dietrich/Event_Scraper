@@ -26,14 +26,7 @@ python -m cli.build_spreadsheets  # scaffold a fresh websites.xlsx + empty event
 ```
 Flags combine freely (`--test` picks *which URLs*, `--per-site` picks *the output format* — independent axes). See README.md's combination table for the exact input/output pairing of each combo.
 
-### Tests
-```
-pip install -r requirements-dev.txt
-pytest                                     # whole suite
-pytest tests/test_score.py                 # one file
-pytest tests/test_score.py -k confidence   # one test by name/keyword
-```
-The suite never hits the network or a real browser: Anthropic calls are stubbed via `FakeAnthropicClient` (`tests/conftest.py`), Playwright is stubbed per-test in `test_fetch.py`.
+No automated test suite is maintained on `main` (it lives on the `tests` branch instead) — verify changes by running the pipeline directly (e.g. `python run.py --test` or `--per-site`).
 
 ## Architecture
 
