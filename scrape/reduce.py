@@ -2,6 +2,7 @@
 
 import re
 import urllib.parse
+from html import unescape
 
 _BLOCK_TAGS_PATTERN = re.compile(
     r"<(script|style|svg|noscript)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE
@@ -15,10 +16,10 @@ _TAG_PATTERN = re.compile(r"<[^>]+>")
 _REPEATED_SPACE_PATTERN = re.compile(r"[ \t]+")
 _REPEATED_NEWLINE_PATTERN = re.compile(r"\n\s*\n+")
 
-# hrefs that don't point anywhere useful - an in-page anchor or a JS-driven
-# handler, never a real signup/details URL - so inlining them would just add
-# noise ahead of the LLM extraction step.
-_NON_NAVIGATING_HREF_PATTERN = re.compile(r"^\s*(#|javascript:)", re.IGNORECASE)
+# hrefs that don't point anywhere useful - an in-page anchor, a JS-driven
+# handler, or a mailto/tel link - never a real signup/details URL - so
+# inlining them would just add noise ahead of the LLM extraction step.
+_NON_NAVIGATING_HREF_PATTERN = re.compile(r"^\s*(#|javascript:|mailto:|tel:)", re.IGNORECASE)
 
 
 def _inline_image_alt_text(match: re.Match) -> str:
@@ -44,12 +45,16 @@ def _make_inline_link_href(base_url: str):
     the information scrape.extract's "signup_link" field depends on.
     Resolves a relative href (e.g. "/events/123") against the page's own URL
     so what reaches the model is always a usable absolute URL. Skips
-    in-page anchors and javascript: links (see _NON_NAVIGATING_HREF_PATTERN)
-    - those aren't real destinations.
+    in-page anchors, javascript: links, and mailto:/tel: links (see
+    _NON_NAVIGATING_HREF_PATTERN) - those aren't real destinations.
     """
 
     def _inline_link_href(match: re.Match) -> str:
-        href, label = match.group(1).strip(), match.group(2)
+        # Chromium's DOM serializer writes "&" in an href's query string as
+        # "&amp;", so a link like "?id=1&type=2" would otherwise get inlined
+        # as a broken URL - unescape before urljoin/skip checks so both see
+        # the real href.
+        href, label = unescape(match.group(1).strip()), match.group(2)
         if not href or _NON_NAVIGATING_HREF_PATTERN.match(href):
             return label
         absolute_url = urllib.parse.urljoin(base_url, href) if base_url else href
@@ -84,6 +89,15 @@ def reduce_html(html: str, base_url: str = "") -> str:
     html = _IMG_ALT_PATTERN.sub(_inline_image_alt_text, html)
     html = _A_HREF_PATTERN.sub(_make_inline_link_href(base_url), html)
     text = _TAG_PATTERN.sub("\n", html)
+    # Decoding entities must happen after the tag strip above, never before:
+    # if it ran first, literal text like "&lt;div&gt;" would decode into
+    # "<div>" and then get eaten by _TAG_PATTERN as if it were real markup,
+    # silently losing legitimate visible text. Also unescapes "&#39;",
+    # "&quot;", "&nbsp;", etc. that would otherwise garble titles and waste
+    # tokens. \xa0 (from "&nbsp;") is normalized to a regular space so the
+    # whitespace-collapse patterns below actually catch it.
+    text = unescape(text)
+    text = text.replace("\xa0", " ")
     text = _REPEATED_SPACE_PATTERN.sub(" ", text)
     text = _REPEATED_NEWLINE_PATTERN.sub("\n", text)
     return text.strip()

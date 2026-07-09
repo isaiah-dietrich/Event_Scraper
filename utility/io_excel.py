@@ -105,9 +105,23 @@ def _is_rejected(row: dict) -> bool:
     )
 
 
+def event_key(source_url: str, title: str, date) -> tuple:
+    """Builds a dedupe key for an event: source site + title + date.
+
+    Public so cli.batch can build an identical key for an event that hasn't
+    been written yet, to skip re-scoring it (see read_existing_event_keys).
+    `date` is expected to be a real datetime.datetime for a successfully
+    parsed date (see cli.batch._filter_past_events) - openpyxl always reads
+    date cells back as datetime.datetime too, which is exactly why a key
+    built here from a freshly-filtered event compares equal to the same
+    event's key read back from a previous run's output file.
+    """
+    return (source_url, title, date)
+
+
 def _event_key(row: dict) -> tuple:
     """Builds a dedupe key for an event row: source site + title + date."""
-    return (row.get("source_url", ""), row.get("title", ""), row.get("date", ""))
+    return event_key(row.get("source_url", ""), row.get("title", ""), row.get("date", ""))
 
 
 def _existing_event_keys(sheet) -> set:
@@ -281,6 +295,32 @@ def append_rows(path: str, rows: list[dict]) -> None:
     workbook.save(path)
     if skipped_count:
         print(f"Skipped {skipped_count} duplicate event(s) already in {path}")
+
+
+def read_existing_event_keys(path: str) -> set:
+    """Returns the dedupe keys of every event already in an output workbook.
+
+    This is the union of _existing_event_keys over both the Events and
+    Rejected Events sheets, i.e. exactly the set append_rows would dedupe
+    a new run's rows against. Callers (see cli.batch) use it to skip
+    scoring an event before it's even written, rather than paying for a
+    scoring AI call only to have the row silently dropped by write-time
+    dedupe in append_rows.
+
+    Returns an empty set if no file exists at `path` yet - the natural
+    "nothing known" starting point for a first run.
+    """
+    if not os.path.exists(path):
+        return set()
+    workbook = load_workbook(path)
+    keys = set()
+    for title in (EVENTS_SHEET_NAME, REJECTED_SHEET_NAME):
+        if title not in workbook.sheetnames:
+            continue
+        sheet = workbook[title]
+        _validate_header(sheet)
+        keys |= _existing_event_keys(sheet)
+    return keys
 
 
 # --- Per-site diagnostic output ---------------------------------------------

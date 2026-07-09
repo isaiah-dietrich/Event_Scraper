@@ -21,6 +21,8 @@ from scrape.fetch import fetch_rendered_html
 from scrape.reduce import reduce_html
 from scrape.score import score_event
 from utility.io_excel import append_rows
+from utility.io_excel import event_key
+from utility.io_excel import read_existing_event_keys
 from utility.io_excel import read_input_urls
 from utility.io_excel import write_per_site_sheets
 from utility.token_usage import check_and_record_usage
@@ -62,6 +64,26 @@ MAX_WORKERS = 4
 # Within a single site, events are scored concurrently too (one Haiku call
 # per event). This is independent of MAX_WORKERS above.
 MAX_SCORING_WORKERS = 8
+
+# A Cloudflare-style "challenge" interstitial (e.g. "Just a moment... Please
+# wait while we verify you are human") is what fetch_rendered_html sometimes
+# returns instead of real content when a site's bot protection blocks even a
+# visible, non-headless browser. reduce_html strips it down to a handful of
+# lines of garbage, so process_site checks for these markers right after
+# reduce and short-circuits before extract_events - otherwise that garbage
+# still gets sent through a full Sonnet extraction call that can't possibly
+# produce events. The length guard exists so a legitimate long page that
+# merely quotes one of these phrases somewhere in its own content is never
+# misclassified: a real challenge page's reduced text is only ever a few
+# short lines, so anything past that length is assumed to be genuine content.
+_BOT_CHALLENGE_MAX_CHARS = 600
+_BOT_CHALLENGE_MARKERS = (
+    "just a moment",
+    "verifying you are human",
+    "checking your browser",
+    "enable javascript and cookies",
+    "attention required",
+)
 
 
 _DATE_PARSER_SETTINGS = {"PREFER_DATES_FROM": "future"}
@@ -314,16 +336,28 @@ def _timestamp() -> str:
     return f"{today:%B} {today.day}, {today:%Y}"
 
 
-def process_site(client: Anthropic, url: str) -> list[dict]:
+def process_site(
+    client: Anthropic, url: str, known_keys: frozenset = frozenset()
+) -> list[dict]:
     """Runs fetch, reduce, and extract for one site.
 
     Args:
         client: An initialized Anthropic client.
         url: The site URL to scrape.
+        known_keys: Dedupe keys (see utility.io_excel.event_key) for events
+            already present in the output workbook from a previous run.
+            After date-filtering, any event whose key is in known_keys is
+            dropped before scoring - no scoring call, no output row - since
+            write-time dedupe in append_rows would silently drop its row
+            anyway, so scoring it first would only have been wasted API
+            cost. Defaults to an empty set so existing callers, and the
+            --per-site diagnostic path in particular, are unaffected.
 
     Returns:
         A list of output row dicts: one per extracted event on success, or
         a single row describing the failure/empty-result status otherwise.
+        Can also be an empty list if every extracted event turned out to
+        already be known (see known_keys).
     """
     base_row = {"scraped_at": _timestamp(), "source_url": url}
 
@@ -336,6 +370,11 @@ def process_site(client: Anthropic, url: str) -> list[dict]:
     if not page_text:
         return [{**base_row, "status": "failed: empty page text after reduction"}]
 
+    if len(page_text) < _BOT_CHALLENGE_MAX_CHARS and any(
+        marker in page_text.lower() for marker in _BOT_CHALLENGE_MARKERS
+    ):
+        return [{**base_row, "status": "failed: blocked by bot protection (challenge page)"}]
+
     try:
         events = extract_events(client, page_text)
     except ValueError as error:
@@ -343,6 +382,19 @@ def process_site(client: Anthropic, url: str) -> list[dict]:
     events = _filter_past_events(events)
     if not events:
         return [{**base_row, "status": "no_events"}]
+
+    if known_keys:
+        remaining = []
+        skipped_count = 0
+        for event in events:
+            key = event_key(url, event.get("title", ""), event.get("date", ""))
+            if key in known_keys:
+                skipped_count += 1
+            else:
+                remaining.append(event)
+        events = remaining
+        if skipped_count:
+            print(f"    [skip] {skipped_count} event(s) already in workbook")
 
     events_to_score, auto_rejected = _split_by_state(events)
 
@@ -416,13 +468,23 @@ def main() -> None:
         print(f"No URLs found in {source}. Nothing to do.")
         sys.exit(0)
 
+    # Pre-scoring dedupe: load which events are already in the output
+    # workbook (a no-op empty set on a fresh/just-wiped file) so process_site
+    # can skip a Haiku scoring call for any of them entirely, instead of
+    # scoring them only to have write-time dedupe in append_rows silently
+    # drop the row anyway. Skipped for --per-site: that mode writes to its
+    # own diagnostic file, not output_path, and its whole point is showing
+    # fresh scoring for every event on every run (see CLAUDE.md), so it must
+    # never be handed a nonempty known_keys.
+    known_keys = frozenset() if per_site_mode else frozenset(read_existing_event_keys(output_path))
+
     print(f"Processing {len(urls)} site(s) from {source} (up to {MAX_WORKERS} at a time)...")
 
     all_rows = []
     rows_by_url = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_url = {
-            executor.submit(process_site, client, url): url for url in urls
+            executor.submit(process_site, client, url, known_keys): url for url in urls
         }
         for future in as_completed(future_to_url):
             url = future_to_url[future]

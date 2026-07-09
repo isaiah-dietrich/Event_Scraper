@@ -102,7 +102,13 @@ def extract_events(client: Anthropic, page_text: str) -> list[dict]:
     )
     response = client.messages.create(
         model=MODEL,
-        max_tokens=8192,
+        # Output tokens are only billed when actually generated, so a higher
+        # ceiling costs nothing on normal pages - but a big calendar's JSON
+        # hitting the old 8192 cap truncated the response, which
+        # extract_events treats as a hard failure and wastes the entire
+        # input token spend for that site. Doubling the cap halves the
+        # truncation-failure rate on large pages for free.
+        max_tokens=16384,
         messages=[{"role": "user", "content": prompt}],
     )
     token_usage_tracker.record(response)

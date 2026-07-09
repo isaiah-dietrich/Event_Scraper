@@ -1,6 +1,7 @@
 """Fetch stage: render a JS-loaded page in Chromium and return its HTML."""
 
 import datetime
+import re
 import urllib.parse
 
 from dateparser.search import search_dates
@@ -27,9 +28,20 @@ _MAX_SETTLE_WAIT_MS = 20_000  # give up and use whatever's rendered by here
 
 # Scroll-triggered lazy loading: some event-calendar pages (e.g. Luma) only
 # render the next batch of events once you scroll near the bottom, so a
-# single page load only ever sees whatever fits in the initial viewport.
-_MAX_SCROLL_ATTEMPTS = 8  # give up here even if the page keeps growing
+# single page load only ever sees whatever fits in the initial viewport. We
+# scroll one viewport at a time (see _scroll_and_collect_snapshots) rather
+# than jumping straight to the bottom: a jump can skip past content that only
+# mounts as it enters the viewport, and some lazy-loaders only fire their
+# IntersectionObserver near the sentinel a single step reaches.
+_MAX_SCROLL_ATTEMPTS = 24  # counts one-viewport steps now, not bottom-jumps -
+# a jump crossed the whole page in one move, so the old cap was small; stepping
+# a viewport at a time needs many more steps to walk a long feed to its end.
 _SCROLL_WAIT_MS = 1_000  # time to let a scroll's newly-loaded content render
+# A 2px slack absorbs sub-pixel rounding in scrollY/scrollHeight so "we've
+# reached the bottom" doesn't flap on a page that's effectively at its end.
+_AT_BOTTOM_SCRIPT = (
+    "(window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 2)"
+)
 
 # This pipeline runs weekly, so scrolling deep into the future to reach
 # events months out isn't worth it - a later run will pick them up once
@@ -38,29 +50,89 @@ _SCROLL_WAIT_MS = 1_000  # time to let a scroll's newly-loaded content render
 _MAX_FUTURE_DAYS = 60  # ~2 months
 _DATE_SEARCH_SETTINGS = {"PREFER_DATES_FROM": "future"}
 
-# Month-by-month calendar navigation: some calendars (e.g. FullCalendar,
-# https://fullcalendar.io - identified by its own ".fc-next-button"/
-# ".fc-toolbar-title" class names, a stable third-party convention rather
-# than a per-site guess) render only one month at a time entirely
-# client-side, with no URL or scroll position to key off of - so a single
-# page load only ever sees whichever month opens by default (usually the
-# current one). See _click_next_month_and_collect_snapshots.
-_FC_NEXT_BUTTON_SELECTOR = ".fc-next-button"
-_FC_TOOLBAR_TITLE_SELECTOR = ".fc-toolbar-title"
+# "Load more"/"Show more events" buttons: when scrolling stalls, some lists
+# keep the rest of their events behind an explicit control instead of an
+# infinite scroll. This is a deliberately conservative text-matched click
+# loop, not a generic "click anything that looks like a button" heuristic:
+# only a button/link whose visible label *begins* with one of these phrases
+# is clicked, so it can't stumble onto "Load more comments", "See more
+# photos", or a destructive action elsewhere on the page. Capped low because
+# each click pays a fresh settle.
+_LOAD_MORE_TEXT_PATTERN = re.compile(
+    r"^(?:load|show|view|see)\s+more\b|^more\s+events?\b", re.IGNORECASE
+)
+_MAX_LOAD_MORE_CLICKS = 5
+# Find-and-click happens in one page-context call so the match and the click
+# are atomic (the element can't shift between a separate query and click).
+# The Python pattern is the single source of truth; its source is embedded as
+# a JS string literal (repr keeps the backslashes escaped the way JS wants).
+_LOAD_MORE_CLICK_SCRIPT = """
+(() => {
+    const pattern = new RegExp(__PATTERN__, "i");
+    const clickables = document.querySelectorAll('button, a, [role="button"]');
+    for (const element of clickables) {
+        const label = (element.textContent || "").trim();
+        if (!pattern.test(label)) continue;
+        const rect = element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        element.click();
+        return true;
+    }
+    return false;
+})()
+""".replace("__PATTERN__", repr(_LOAD_MORE_TEXT_PATTERN.pattern))
+
+# Embedded calendars (Google Calendar embeds, Localist, GrowthZone /
+# ChamberMaster - common for chambers of commerce) live in an <iframe>, and
+# page.content() only serializes the main frame, so their events would
+# otherwise reach the LLM as zero text. Child frames are captured separately
+# (see _capture_child_frames). Trivial frames (about:blank, and the tiny ad
+# pixels / social widgets that carry no event text) are skipped by an HTML
+# size floor rather than a per-vendor allowlist.
+_MIN_FRAME_HTML_CHARS = 500
+
+# Month-by-month calendar navigation: some calendars render only one month at
+# a time entirely client-side, with no URL or scroll position to key off of -
+# so a single page load only ever sees whichever month opens by default
+# (usually the current one). We recognize a small, ordered allowlist of known
+# "next month" controls rather than guessing at arbitrary arrows, trying the
+# first one actually present on the page (see
+# _click_next_month_and_collect_snapshots).
+_NEXT_MONTH_SELECTORS = (
+    ".fc-next-button",  # FullCalendar (https://fullcalendar.io)
+    ".tribe-events-c-nav__next",  # The Events Calendar (WordPress plugin)
+    '[aria-label*="next month" i]',  # generic ARIA-labeled next control
+)
 
 # Cut short earlier in the common case by _is_beyond_future_cutoff; this is
-# just a hard ceiling for when that never trips (e.g. an empty/malformed
-# toolbar title).
+# just a hard ceiling for when that never trips (e.g. a calendar with an
+# effectively unbounded run of future months).
 _MAX_MONTH_CLICKS = 3
 
 # Numbered-page pagination (e.g. Eventbrite's "?page=1"): follow up to this
 # many pages beyond the one given, in addition to whatever a single page's
-# own scrolling reveals. Deliberately a flat cap rather than "stop once a
-# page looks empty/duplicate" - some sites' listings aren't sorted
-# chronologically (unlike a scrolling feed, which usually is), so there's
-# no safe date-based signal to stop on early; a predictable cap keeps the
-# per-site cost bounded instead.
+# own scrolling reveals. A flat cap bounds the per-site cost; on top of it,
+# pagination stops early once a page's content repeats one already fetched
+# (see _pages_are_near_duplicate), since many sites serve page 1's listing
+# verbatim for out-of-range page numbers.
 _MAX_ADDITIONAL_PAGES = 4
+# Two pages count as the same content once this fraction of one's non-blank
+# text lines already appeared on the other - a near-subset, not just a
+# byte-for-byte match, to tolerate incidental per-page chrome differences.
+_DUPLICATE_PAGE_OVERLAP_RATIO = 0.95
+
+# A page load can fail transiently (a flaky navigation, a slow CDN, a
+# Cloudflare interstitial that clears on a second try). One retry after a
+# short pause clears most of those without turning fetch into an unbounded
+# retry loop.
+_RETRY_WAIT_MS = 2_000
+
+# Snapshot subsumption pruning: every scroll/click step captures the full DOM
+# at that moment, so a grow-only page scrolled N times would otherwise be sent
+# to the LLM ~N times over. A snapshot is dropped only if it adds essentially
+# nothing new over the snapshots already kept (see _prune_subsumed_snapshots).
+_PRUNE_MIN_NEW_LINES = 2  # keep a snapshot contributing more than this many
+_PRUNE_MIN_NEW_LINE_RATIO = 0.02  # ...or more than this fraction of its own lines
 
 
 def _is_beyond_future_cutoff(html: str) -> bool:
@@ -101,6 +173,17 @@ def _is_beyond_future_cutoff(html: str) -> bool:
     return found_a_date
 
 
+def _non_blank_lines(html: str) -> set[str]:
+    """The set of non-blank visible-text lines in `html`, via reduce_html.
+
+    A snapshot's reduced text lines are the unit both the duplicate-page
+    check and snapshot pruning compare on - working on the same reduced,
+    de-marked-up text the LLM eventually sees keeps those decisions aligned
+    with what actually reaches extraction.
+    """
+    return {line for line in reduce_html(html).splitlines() if line.strip()}
+
+
 def _wait_for_content_to_settle(page) -> str:
     """Polls page.content() until it stops changing, then returns it.
 
@@ -122,85 +205,157 @@ def _wait_for_content_to_settle(page) -> str:
     return current_html
 
 
+def _capture_child_frames(page) -> list[str]:
+    """Captures the HTML of every non-trivial child frame on the page.
+
+    page.content() only serializes the main frame, so an embedded calendar
+    (Google Calendar, Localist, GrowthZone/ChamberMaster) contributes no
+    text at all without this. frame.content() works cross-origin because
+    Playwright drives it over CDP rather than through the DOM. about:blank
+    frames and anything below _MIN_FRAME_HTML_CHARS (ad pixels, social
+    widgets) carry no event text and are skipped. Each read is wrapped
+    because a frame can detach between the frames() enumeration and the
+    read - a detached frame is simply skipped rather than failing the fetch.
+    """
+    snapshots = []
+    for frame in page.frames:
+        if frame is page.main_frame:
+            continue
+        if not frame.url or frame.url == "about:blank":
+            continue
+        try:
+            html = frame.content()
+        except Exception:
+            continue
+        if len(html) < _MIN_FRAME_HTML_CHARS:
+            continue
+        snapshots.append(html)
+    return snapshots
+
+
 def _scroll_and_collect_snapshots(page) -> list[str]:
-    """Scrolls to the bottom repeatedly, capturing an HTML snapshot each time
-    the page actually grows.
+    """Scrolls down one viewport at a time, capturing an HTML snapshot each
+    step the page's content actually changes.
 
     Some event-calendar pages (Luma, etc.) use a *virtualized* list: only a
     window of events is ever mounted in the DOM at once, and earlier ones
     get unmounted as later ones scroll into view. That means no single
     scroll position ever shows the whole list - so instead of scrolling to
     the end and capturing once, this captures a snapshot at every step
-    where new content loaded and returns them all, to be combined into one
+    where the DOM changed and returns them all, to be combined into one
     block of text before extraction. A duplicate/overlapping event
     mentioned in more than one snapshot is harmless: extraction already
     treats repeated mentions of the same event as one distinct event
     rather than double-counting it.
 
+    Stepping a single viewport at a time (rather than jumping to the
+    bottom) matters for exactly those virtualized/lazy lists: a jump can
+    skip past content that only mounts as it scrolls through the viewport,
+    and some lazy-loaders only fire their IntersectionObserver when the
+    sentinel a single step reaches comes into view.
+
     Skips scrolling entirely if the page doesn't even overflow the
     viewport - there's nothing below the fold to reveal. Otherwise stops
-    once a scroll doesn't grow the page (nothing more to load) or once a
-    step's content is entirely beyond _MAX_FUTURE_DAYS out (see
-    _is_beyond_future_cutoff). That cutoff only stops *further* scrolling -
-    whatever's in the snapshot that crossed it is still kept, since content
-    we already have is worth keeping even if it's further out than we'd
-    scroll to reach on purpose. Gives up at _MAX_SCROLL_ATTEMPTS regardless,
-    since some calendars have an effectively unbounded number of future
-    events to keep loading.
+    once the bottom is reached and the page has stopped growing (nothing
+    more to load), or once a step's content is entirely beyond
+    _MAX_FUTURE_DAYS out (see _is_beyond_future_cutoff). That cutoff only
+    stops *further* scrolling - whatever's in the snapshot that crossed it
+    is still kept, since content we already have is worth keeping even if
+    it's further out than we'd scroll to reach on purpose. Gives up at
+    _MAX_SCROLL_ATTEMPTS regardless, since some calendars have an
+    effectively unbounded number of future events to keep loading.
     """
     snapshots = []
     previous_height = page.evaluate("document.body.scrollHeight")
     viewport_height = page.evaluate("window.innerHeight")
     if previous_height <= viewport_height:
         return snapshots
+    previous_html = page.content()
     for _ in range(_MAX_SCROLL_ATTEMPTS):
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.evaluate("window.scrollBy(0, window.innerHeight)")
         page.wait_for_timeout(_SCROLL_WAIT_MS)
-        current_height = page.evaluate("document.body.scrollHeight")
-        if current_height <= previous_height:
-            break
         html = page.content()
-        snapshots.append(html)
+        content_changed = html != previous_html
+        if content_changed:
+            snapshots.append(html)
+        previous_html = html
+        current_height = page.evaluate("document.body.scrollHeight")
+        at_bottom = page.evaluate(_AT_BOTTOM_SCRIPT)
+        grew = current_height > previous_height
         previous_height = current_height
+        if content_changed and _is_beyond_future_cutoff(html):
+            break
+        if at_bottom and not grew:
+            break
+    return snapshots
+
+
+def _click_load_more_and_collect_snapshots(page) -> list[str]:
+    """Clicks a "Load more"/"Show more events"-style control repeatedly,
+    capturing an HTML snapshot each time it actually reveals new content.
+
+    Runs after scrolling has stalled, for lists that gate the rest of their
+    events behind an explicit button rather than infinite scroll. Only a
+    control whose visible label matches _LOAD_MORE_TEXT_PATTERN is clicked
+    (see that constant for why this is kept deliberately narrow). Stops as
+    soon as no matching control is found, a click reveals nothing new, a
+    click throws (the element detached or got covered), a step's content is
+    entirely beyond _MAX_FUTURE_DAYS out, or after _MAX_LOAD_MORE_CLICKS.
+    """
+    snapshots = []
+    previous_html = page.content()
+    for _ in range(_MAX_LOAD_MORE_CLICKS):
+        try:
+            clicked = page.evaluate(_LOAD_MORE_CLICK_SCRIPT)
+        except Exception:
+            break
+        if not clicked:
+            break
+        html = _wait_for_content_to_settle(page)
+        if html == previous_html:
+            break
+        snapshots.append(html)
+        previous_html = html
         if _is_beyond_future_cutoff(html):
             break
     return snapshots
 
 
 def _click_next_month_and_collect_snapshots(page) -> list[str]:
-    """Clicks a FullCalendar-style "next month" button repeatedly, capturing
-    an HTML snapshot each time it actually advances to a new month.
+    """Clicks a calendar's "next month" button repeatedly, capturing an HTML
+    snapshot each time it actually advances to new content.
 
-    Skips entirely if the page has no _FC_NEXT_BUTTON_SELECTOR - this only
-    recognizes FullCalendar's specific markup, not a generic "find and click
-    arrows" heuristic (same spirit as _page_urls_to_follow only recognizing
-    one URL pagination convention rather than guessing at others). Stops
-    once a click doesn't change _FC_TOOLBAR_TITLE_SELECTOR's text (nothing
-    further to reach), once a step's content is entirely beyond
+    Skips entirely unless one of _NEXT_MONTH_SELECTORS is present, trying
+    them in order and using the first match - a small allowlist of known
+    calendar widgets, not a generic "find and click arrows" heuristic (same
+    spirit as _page_urls_to_follow only recognizing one URL pagination
+    convention rather than guessing at others). The stop signal is generic
+    on purpose, since these widgets share no common "current month" label:
+    if a click leaves the settled HTML unchanged, nothing advanced, so
+    stop. Also stops once a step's content is entirely beyond
     _MAX_FUTURE_DAYS out (see _is_beyond_future_cutoff - same reasoning as
     _scroll_and_collect_snapshots), or after _MAX_MONTH_CLICKS regardless.
     """
-    has_next_button = page.evaluate(
-        f"!!document.querySelector('{_FC_NEXT_BUTTON_SELECTOR}')"
+    selector = next(
+        (
+            candidate
+            for candidate in _NEXT_MONTH_SELECTORS
+            if page.evaluate(f"!!document.querySelector({candidate!r})")
+        ),
+        None,
     )
-    if not has_next_button:
+    if selector is None:
         return []
 
-    def _toolbar_title():
-        return page.evaluate(
-            f"document.querySelector('{_FC_TOOLBAR_TITLE_SELECTOR}')?.textContent?.trim() ?? null"
-        )
-
     snapshots = []
-    previous_title = _toolbar_title()
+    previous_html = page.content()
     for _ in range(_MAX_MONTH_CLICKS):
-        page.evaluate(f"document.querySelector('{_FC_NEXT_BUTTON_SELECTOR}').click()")
+        page.evaluate(f"document.querySelector({selector!r}).click()")
         html = _wait_for_content_to_settle(page)
-        current_title = _toolbar_title()
-        if current_title == previous_title:
+        if html == previous_html:
             break
         snapshots.append(html)
-        previous_title = current_title
+        previous_html = html
         if _is_beyond_future_cutoff(html):
             break
     return snapshots
@@ -213,9 +368,10 @@ def _page_urls_to_follow(url: str) -> list[str]:
     Deliberately narrow: only recognizes a literal "page" query parameter
     with a numeric value (e.g. "...?page=1"), the one pagination convention
     actually confirmed in the wild so far (Eventbrite). Sites that paginate
-    some other way (a "Load More" button, cursor-based URLs, a path segment
-    like "/page/2/", etc.) aren't detected - those still need a URL added
-    manually per page, same as before this existed.
+    via other URL schemes (cursor-based URLs, a path segment like
+    "/page/2/", etc.) aren't detected - those still need a URL added
+    manually per page. In-page "Load More" buttons are handled separately
+    (see _click_load_more_and_collect_snapshots).
     """
     parsed = urllib.parse.urlsplit(url)
     query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
@@ -237,16 +393,90 @@ def _page_urls_to_follow(url: str) -> list[str]:
     return urls
 
 
-def _load_and_capture(page, url: str) -> str:
+def _pages_are_near_duplicate(lines_a: set[str], lines_b: set[str]) -> bool:
+    """True if two pages' reduced text lines are effectively the same content.
+
+    Not a byte-for-byte comparison: a page counts as a duplicate once
+    _DUPLICATE_PAGE_OVERLAP_RATIO of *either* page's non-blank lines already
+    appear on the other, i.e. one is a near-subset of the other. That catches
+    both the exact-repeat case (an out-of-range "?page=N" served page 1's
+    listing again) and the case where the repeat picks up a little extra
+    per-page chrome, without treating two genuinely distinct pages of a
+    listing as the same.
+    """
+    if not lines_a or not lines_b:
+        return lines_a == lines_b
+    overlap = len(lines_a & lines_b)
+    return (
+        overlap >= _DUPLICATE_PAGE_OVERLAP_RATIO * len(lines_a)
+        or overlap >= _DUPLICATE_PAGE_OVERLAP_RATIO * len(lines_b)
+    )
+
+
+def _prune_subsumed_snapshots(snapshots: list[str]) -> list[str]:
+    """Drops snapshots whose text is already covered by the ones kept, so a
+    grow-only page isn't sent to the LLM once per scroll step.
+
+    Every snapshot is the full DOM at some moment, so on a page that only
+    ever grows, the last snapshot is a superset of all earlier ones and
+    resending them wastes tokens. Walking newest-first and keeping a
+    snapshot only when it contributes meaningfully many lines not already
+    seen collapses such a page to (roughly) its final snapshot, while a
+    virtualized list's earlier snapshots - which hold events the final
+    snapshot has since unmounted - do contribute new lines and survive.
+
+    Direction is load-bearing: newest-first is what keeps the fullest
+    snapshot of a grow-only page and discards its earlier subsets. This
+    prunes whole snapshots only; it never dedupes individual lines, because
+    a line like "6:00 PM" legitimately recurs across different events and
+    dropping the repeats would corrupt them.
+    """
+    kept_lines: set[str] = set()
+    kept_indices: list[int] = []
+    for index in reversed(range(len(snapshots))):
+        lines = _non_blank_lines(snapshots[index])
+        if not lines:
+            continue
+        new_lines = lines - kept_lines
+        if (
+            len(new_lines) > _PRUNE_MIN_NEW_LINES
+            or len(new_lines) > _PRUNE_MIN_NEW_LINE_RATIO * len(lines)
+        ):
+            kept_indices.append(index)
+            kept_lines |= lines
+    kept_indices.sort()
+    return [snapshots[index] for index in kept_indices]
+
+
+def _load_and_capture(page, url: str) -> list[str]:
     """Navigates to `url` and returns its settled HTML plus any additional
-    content pulled in by scrolling or month-by-month calendar navigation
-    (see _wait_for_content_to_settle, _scroll_and_collect_snapshots, and
-    _click_next_month_and_collect_snapshots)."""
+    content pulled in by embedded frames, scrolling, "load more" clicks, or
+    month-by-month calendar navigation, as a list of per-step snapshots (see
+    _wait_for_content_to_settle, _capture_child_frames,
+    _scroll_and_collect_snapshots, _click_load_more_and_collect_snapshots,
+    and _click_next_month_and_collect_snapshots)."""
     page.goto(url, wait_until="domcontentloaded", timeout=_GOTO_TIMEOUT_MS)
-    first_snapshot = _wait_for_content_to_settle(page)
-    more_snapshots = _scroll_and_collect_snapshots(page)
-    more_snapshots += _click_next_month_and_collect_snapshots(page)
-    return "\n".join([first_snapshot] + more_snapshots)
+    snapshots = [_wait_for_content_to_settle(page)]
+    snapshots += _capture_child_frames(page)
+    snapshots += _scroll_and_collect_snapshots(page)
+    snapshots += _click_load_more_and_collect_snapshots(page)
+    snapshots += _click_next_month_and_collect_snapshots(page)
+    return snapshots
+
+
+def _load_and_capture_with_retry(page, url: str) -> list[str]:
+    """Runs _load_and_capture, retrying it once after any failure.
+
+    A first navigation can fail transiently (see _RETRY_WAIT_MS). A single
+    retry after a short pause clears most of those; if the retry fails too,
+    its exception propagates and fetch_rendered_html turns it into a
+    RuntimeError, exactly as an un-retried failure would have.
+    """
+    try:
+        return _load_and_capture(page, url)
+    except Exception:
+        page.wait_for_timeout(_RETRY_WAIT_MS)
+        return _load_and_capture(page, url)
 
 
 def fetch_rendered_html(url: str) -> str:
@@ -256,10 +486,14 @@ def fetch_rendered_html(url: str) -> str:
     Runs Chromium non-headless with a realistic user agent, since some
     sites (e.g. those behind Cloudflare) detect and block headless
     automation outright. See _load_and_capture for how a single page is
-    loaded and settled (including scrolling and FullCalendar-style
-    month-by-month navigation), and _page_urls_to_follow for how additional
-    numbered pages (e.g. Eventbrite's "?page=1", "?page=2", ...) are
-    detected and queued up alongside it.
+    loaded and settled (including embedded frames, scrolling, "load more"
+    clicks, and calendar month navigation), and _page_urls_to_follow for how
+    additional numbered pages (e.g. Eventbrite's "?page=1", "?page=2", ...)
+    are detected and queued up alongside it. Numbered pagination stops early
+    once a page repeats content already fetched (see
+    _pages_are_near_duplicate), and the collected snapshots are pruned of
+    ones subsumed by others (see _prune_subsumed_snapshots) before joining,
+    to avoid resending near-identical DOM states to the LLM.
 
     Args:
         url: The page to load.
@@ -275,8 +509,18 @@ def fetch_rendered_html(url: str) -> str:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=False)
             page = browser.new_page(user_agent=_USER_AGENT, viewport=_VIEWPORT)
-            snapshots = [_load_and_capture(page, page_url) for page_url in _page_urls_to_follow(url)]
+            snapshots: list[str] = []
+            previous_page_lines: set[str] | None = None
+            for page_url in _page_urls_to_follow(url):
+                page_snapshots = _load_and_capture_with_retry(page, page_url)
+                snapshots += page_snapshots
+                page_lines = _non_blank_lines("\n".join(page_snapshots))
+                if previous_page_lines is not None and _pages_are_near_duplicate(
+                    page_lines, previous_page_lines
+                ):
+                    break
+                previous_page_lines = page_lines
             browser.close()
-            return "\n".join(snapshots)
+            return "\n".join(_prune_subsumed_snapshots(snapshots))
     except Exception as error:
         raise RuntimeError(f"Failed to load page with Playwright: {error}") from error
