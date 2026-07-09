@@ -5,6 +5,8 @@ import re
 
 from anthropic import Anthropic
 
+from utility.token_usage import tracker as token_usage_tracker
+
 # Scoring is a small, cheap classification task, so it uses Haiku instead of
 # the larger Sonnet model used for extraction (see scrape.extract.MODEL).
 MODEL = "claude-haiku-4-5-20251001"
@@ -81,6 +83,7 @@ def score_event(client: Anthropic, event: dict) -> dict:
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}],
     )
+    token_usage_tracker.record(response)
     raw_text = response.content[0].text.strip()
     cleaned = _FENCE_START_PATTERN.sub("", raw_text)
     cleaned = _FENCE_END_PATTERN.sub("", cleaned)

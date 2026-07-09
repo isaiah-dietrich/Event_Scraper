@@ -23,6 +23,8 @@ from scrape.score import score_event
 from utility.io_excel import append_rows
 from utility.io_excel import read_input_urls
 from utility.io_excel import write_per_site_sheets
+from utility.token_usage import check_and_record_usage
+from utility.token_usage import tracker as token_usage_tracker
 
 INPUT_PATH = "websites.xlsx"
 OUTPUT_PATH = "events_output.xlsx"
@@ -33,14 +35,19 @@ TEST_OUTPUT_PATH = "events_output_test.xlsx"
 # - that's still the single Events/Rejected Events workbook via append_rows.
 PER_SITE_OUTPUT_PATH = "events_output_by_site.xlsx"
 
+# Log of every run's token usage (see utility.token_usage), so a run that
+# uses much more than the last one of the same mode gets flagged instead of
+# silently costing more than expected.
+TOKEN_USAGE_HISTORY_PATH = "token_usage_history.json"
+
 # Paste site URLs here to test the pipeline without touching websites.xlsx.
 # Run with: python run.py --test
 TEST_URLS = [
-    #"https://ai.gatech.edu/events",
+    "https://ai.gatech.edu/events",
     #"https://members.tagonline.org/calendar",
-    #"https://www.georgiamanufacturingalliance.com/events/",
+    "https://www.georgiamanufacturingalliance.com/events/",
     #"https://www.aimanufacturingconference.com/",
-    "https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
+    #"https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
     #"https://luma.com/genai-collective",
     #"https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1"
     #"https://atlanta.aitinkerers.org/",
@@ -325,7 +332,7 @@ def process_site(client: Anthropic, url: str) -> list[dict]:
     except RuntimeError as error:
         return [{**base_row, "status": f"failed: {error}"}]
 
-    page_text = reduce_html(html)
+    page_text = reduce_html(html, base_url=url)
     if not page_text:
         return [{**base_row, "status": "failed: empty page text after reduction"}]
 
@@ -375,6 +382,15 @@ def main() -> None:
     test_mode = "--test" in sys.argv
     fresh_mode = "--fresh" in sys.argv
     per_site_mode = "--per-site" in sys.argv
+
+    # Labels which output shape this run produced (see check_and_record_usage)
+    # so token usage is only ever compared against past runs of the same
+    # shape - "--test" scrapes a handful of scratch URLs (TEST_URLS) and
+    # would otherwise look like a nonsensical swing against a full run over
+    # websites.xlsx, or vice versa. --fresh doesn't get its own label since
+    # it only changes whether output is wiped first, not which URLs/output
+    # format are used.
+    usage_mode = ("test_" if test_mode else "") + ("per_site" if per_site_mode else "normal")
 
     if test_mode:
         urls = TEST_URLS
@@ -433,6 +449,9 @@ def main() -> None:
     else:
         append_rows(output_path, all_rows)
         print(f"\nAppended {len(all_rows)} row(s) to {output_path}")
+
+    print(f"Token usage: {token_usage_tracker.summary()}")
+    check_and_record_usage(token_usage_tracker, TOKEN_USAGE_HISTORY_PATH, usage_mode)
 
 
 if __name__ == "__main__":
