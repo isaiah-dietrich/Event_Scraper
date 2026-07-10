@@ -21,6 +21,34 @@ _REPEATED_NEWLINE_PATTERN = re.compile(r"\n\s*\n+")
 # inlining them would just add noise ahead of the LLM extraction step.
 _NON_NAVIGATING_HREF_PATTERN = re.compile(r"^\s*(#|javascript:|mailto:|tel:)", re.IGNORECASE)
 
+# Signals that an <a>'s target URL is worth inlining (see
+# _anchor_url_is_worth_inlining). A heading nested inside the anchor marks an
+# event *title* link; a visible label that reads as an action/details phrase
+# marks a "Register"/"Learn More"-style link. Everything else is treated as
+# nav/footer/social chrome whose URL is dropped.
+_HEADING_IN_LABEL_PATTERN = re.compile(r"<h[1-6][\s>]", re.IGNORECASE)
+_MIN_LABEL_WORDS_FOR_URL = 4
+_LINK_ACTION_PHRASES = (
+    "register",
+    "registration",
+    "sign up",
+    "signup",
+    "rsvp",
+    "learn more",
+    "read more",
+    "view event",
+    "view details",
+    "event details",
+    "more details",
+    "more info",
+    "details",
+    "tickets",
+    "get tickets",
+    "buy tickets",
+    "reserve",
+    "book now",
+)
+
 
 def _inline_image_alt_text(match: re.Match) -> str:
     """Turns an <img alt="..."> into visible text instead of losing it.
@@ -32,6 +60,39 @@ def _inline_image_alt_text(match: re.Match) -> str:
     """
     alt_text = match.group(1).strip()
     return f"\n{alt_text}\n" if alt_text else ""
+
+
+def _anchor_url_is_worth_inlining(label_html: str) -> bool:
+    """Decides whether an <a>'s target URL should be kept next to its text.
+
+    We inline link URLs so scrape.extract can populate "signup_link", but a
+    page's anchors are overwhelmingly nav/footer/social/legal links whose URLs
+    are pure token waste (47-65% of a reduced page in practice, almost none of
+    it an event link). Keep the URL only when the anchor plausibly points at an
+    event:
+      - it wraps a heading (an event *title* is usually an <h1>-<h6> link), or
+      - its visible text is substantial (>= _MIN_LABEL_WORDS_FOR_URL words) -
+        catching card-style title links that carry no heading tag, or
+      - its visible text reads as an action/details phrase ("Register", "Learn
+        More", "View Event", ... - see _LINK_ACTION_PHRASES).
+    Short nav labels ("About", "Login", "Cart") match none of these, so their
+    URLs are dropped while the visible label text is still kept.
+
+    Args:
+        label_html: The anchor's inner HTML (match group 2), still carrying any
+            nested tags - inspected before the generic tag-strip runs.
+    """
+    if _HEADING_IN_LABEL_PATTERN.search(label_html):
+        return True
+    visible = unescape(_TAG_PATTERN.sub(" ", label_html))
+    # Count only real words - a lone "&", "-" or "/" (common in labels like
+    # "Legal & Privacy") isn't a word and shouldn't push a 2-3 word nav label
+    # over the substantial-label threshold.
+    words = [token for token in visible.split() if any(c.isalnum() for c in token)]
+    if len(words) >= _MIN_LABEL_WORDS_FOR_URL:
+        return True
+    lowered = " ".join(words).lower()
+    return any(phrase in lowered for phrase in _LINK_ACTION_PHRASES)
 
 
 def _make_inline_link_href(base_url: str):
@@ -46,7 +107,10 @@ def _make_inline_link_href(base_url: str):
     Resolves a relative href (e.g. "/events/123") against the page's own URL
     so what reaches the model is always a usable absolute URL. Skips
     in-page anchors, javascript: links, and mailto:/tel: links (see
-    _NON_NAVIGATING_HREF_PATTERN) - those aren't real destinations.
+    _NON_NAVIGATING_HREF_PATTERN) - those aren't real destinations - and drops
+    the URL of any anchor that doesn't look like an event link at all (see
+    _anchor_url_is_worth_inlining), keeping only its visible label text so a
+    page's nav/footer/social chrome doesn't flood the prompt with URLs.
     """
 
     def _inline_link_href(match: re.Match) -> str:
@@ -56,6 +120,8 @@ def _make_inline_link_href(base_url: str):
         # the real href.
         href, label = unescape(match.group(1).strip()), match.group(2)
         if not href or _NON_NAVIGATING_HREF_PATTERN.match(href):
+            return label
+        if not _anchor_url_is_worth_inlining(label):
             return label
         absolute_url = urllib.parse.urljoin(base_url, href) if base_url else href
         return f"{label} ({absolute_url})"
