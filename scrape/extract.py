@@ -44,10 +44,13 @@ Rules:
 - If a field is unknown/missing, use an empty string "" (or false for
   is_in_person).
 - Links in the page text appear as "Label (https://...)" - the URL in
-  parentheses is that link's actual target. If the event's own title, or a
-  nearby button/link ("Learn More", "Register", "Sign Up", "Click to view
-  event", etc.), has a URL in parentheses like this, use that URL as
-  "signup_link". Otherwise use "".
+  parentheses is that link's actual target. Set "signup_link" to the URL that
+  best reaches this event's own page or registration, choosing in this order:
+  a registration/tickets/RSVP link, else the URL attached to the event's own
+  title, else a nearby "Learn More"/"View Event"/"Details" link. A
+  parenthesized URL on the event's title IS its signup_link even when no
+  separate "Register" button exists next to it. Use "" only when no such URL
+  appears near the event.
 - Do not invent events that are not in the text.
 - If a date in the text has no year (e.g. "Wed, Jul 8", "Tuesday",
   "Tomorrow"), resolve it relative to today's date above and pick the

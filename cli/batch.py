@@ -21,6 +21,7 @@ from scrape.fetch import fetch_rendered_html
 from scrape.reduce import reduce_html
 from scrape.score import score_event
 from utility.io_excel import append_rows
+from utility.io_excel import archive_past_events
 from utility.io_excel import event_key
 from utility.io_excel import read_existing_event_keys
 from utility.io_excel import read_input_urls
@@ -52,7 +53,7 @@ TEST_URLS = [
     "https://www.aimanufacturingconference.com/",
     "https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
     "https://luma.com/genai-collective",
-    "https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1"
+    "https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1",
     "https://atlanta.aitinkerers.org/",
     "https://www.meetup.com/atlbitlab/events/"
 ]
@@ -337,6 +338,25 @@ def _timestamp() -> str:
     return f"{today:%B} {today.day}, {today:%Y}"
 
 
+def _build_event_row(base_row: dict, event: dict, url: str) -> dict:
+    """Builds the shared fields of an output row for one extracted event -
+    everything except fit_score/confidence/fit_reason, which differ between
+    the auto-rejected and scored paths in process_site.
+
+    Falls back signup_link to the site's own base URL with a trailing " *"
+    when extraction didn't find a real one, so the row still points
+    somewhere useful instead of being blank - the asterisk signals to the
+    human reader that the exact signup link wasn't found and must be
+    located from that base calendar page themselves. Events that DO have a
+    real signup_link are left unchanged.
+    """
+    row = {**base_row, "status": "ok"}
+    row.update({field: event.get(field, "") for field in EXTRACTION_FIELDS})
+    if not str(row.get("signup_link", "")).strip():
+        row["signup_link"] = f"{url} *"
+    return row
+
+
 def process_site(
     client: Anthropic, url: str, known_keys: frozenset = frozenset()
 ) -> list[dict]:
@@ -360,7 +380,14 @@ def process_site(
         Can also be an empty list if every extracted event turned out to
         already be known (see known_keys).
     """
-    base_row = {"scraped_at": _timestamp(), "source_url": url}
+    # "title" defaults to the site URL so failure/no_events rows - which
+    # have no event of their own - stay identifiable now that there's no
+    # separate URL column (see utility.io_excel.OUTPUT_COLUMNS). Every "ok"
+    # row overwrites this with the real event's title via
+    # _build_event_row's EXTRACTION_FIELDS update below. source_url itself
+    # is kept in base_row (just not written as its own column anymore) -
+    # _build_event_row needs it for the signup_link fallback.
+    base_row = {"scraped_at": _timestamp(), "source_url": url, "title": url}
 
     try:
         html = fetch_rendered_html(url)
@@ -388,7 +415,7 @@ def process_site(
         remaining = []
         skipped_count = 0
         for event in events:
-            key = event_key(url, event.get("title", ""), event.get("date", ""))
+            key = event_key(event.get("title", ""), event.get("date", ""))
             if key in known_keys:
                 skipped_count += 1
             else:
@@ -401,8 +428,7 @@ def process_site(
 
     rows = []
     for event, reason in auto_rejected:
-        row = {**base_row, "status": "ok"}
-        row.update({field: event.get(field, "") for field in EXTRACTION_FIELDS})
+        row = _build_event_row(base_row, event, url)
         row["fit_score"] = 1
         row["confidence"] = "high"
         row["fit_reason"] = reason
@@ -414,8 +440,7 @@ def process_site(
                 executor.map(lambda event: score_event(client, event), events_to_score)
             )
         for event, scoring in zip(events_to_score, scorings):
-            row = {**base_row, "status": "ok"}
-            row.update({field: event.get(field, "") for field in EXTRACTION_FIELDS})
+            row = _build_event_row(base_row, event, url)
             row["fit_score"] = scoring["score"]
             row["confidence"] = scoring["confidence"]
             row["fit_reason"] = scoring["reason"]
@@ -469,6 +494,19 @@ def main() -> None:
         print(f"No URLs found in {source}. Nothing to do.")
         sys.exit(0)
 
+    # Archive any event that's aged into the past out of Events/Rejected
+    # Events into the "past_events" sheet before this run reads/dedupes
+    # against the workbook, so both read_existing_event_keys below and the
+    # client's view of the live sheets only ever reflect current/upcoming
+    # events. Skipped for --per-site (its own diagnostic file, not
+    # output_path). Not skipped for --test: harmless (that mode just wiped
+    # its output file above, so os.path.exists is already False there) but
+    # kept unconditional across both append-mode paths for consistency.
+    if not per_site_mode and os.path.exists(output_path):
+        archived_count = archive_past_events(output_path)
+        if archived_count:
+            print(f"Archived {archived_count} past event(s) to 'past_events' in {output_path}")
+
     # Pre-scoring dedupe: load which events are already in the output
     # workbook (a no-op empty set on a fresh/just-wiped file) so process_site
     # can skip a Haiku scoring call for any of them entirely, instead of
@@ -495,6 +533,7 @@ def main() -> None:
                 rows = [{
                     "scraped_at": _timestamp(),
                     "source_url": url,
+                    "title": url,
                     "status": f"failed: unexpected error: {error}",
                 }]
             print(f"[done] {url}")

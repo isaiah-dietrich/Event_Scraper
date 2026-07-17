@@ -4,6 +4,8 @@ Output rows are written into a self-expanding Excel Table (blue/white
 banded style) so the sheet stays sortable/filterable as it grows.
 """
 
+import copy
+import datetime
 import os
 import re
 
@@ -18,6 +20,7 @@ TABLE_STYLE = "TableStyleMedium2"  # Built-in blue header, white/light-blue band
 
 EVENTS_SHEET_NAME = "Events"
 REJECTED_SHEET_NAME = "Rejected Events"
+PAST_EVENTS_SHEET_NAME = "past_events"
 
 # Statuses whose rows participate in cross-run dedupe (see _event_key,
 # _existing_event_keys, _append_to_sheet).
@@ -30,7 +33,6 @@ OUTPUT_COLUMNS = [
     "confidence",
     "date",
     "scraped_at",
-    "source_url",
     "start_time",
     "location",
     "signup_link",
@@ -46,7 +48,6 @@ _DISPLAY_HEADERS = {
     "confidence": "Confidence",
     "date": "Event Date",
     "scraped_at": "Date Scraped",
-    "source_url": "URL",
     "start_time": "Start Time",
     "location": "Location",
     "signup_link": "Signup Link",
@@ -105,8 +106,8 @@ def _is_rejected(row: dict) -> bool:
     )
 
 
-def event_key(source_url: str, title: str, date) -> tuple:
-    """Builds a dedupe key for an event: source site + title + date.
+def event_key(title: str, date) -> tuple:
+    """Builds a dedupe key for an event: title + date.
 
     Public so cli.batch can build an identical key for an event that hasn't
     been written yet, to skip re-scoring it (see read_existing_event_keys).
@@ -115,20 +116,23 @@ def event_key(source_url: str, title: str, date) -> tuple:
     date cells back as datetime.datetime too, which is exactly why a key
     built here from a freshly-filtered event compares equal to the same
     event's key read back from a previous run's output file.
+
+    Deliberately excludes source_url (there is no longer a URL column in
+    the output - see OUTPUT_COLUMNS): the same event cross-posted on two
+    different sites now dedupes to a single row instead of one per site.
     """
-    return (source_url, title, date)
+    return (title, date)
 
 
 def _event_key(row: dict) -> tuple:
-    """Builds a dedupe key for an event row: source site + title + date."""
-    return event_key(row.get("source_url", ""), row.get("title", ""), row.get("date", ""))
+    """Builds a dedupe key for an event row: title + date."""
+    return event_key(row.get("title", ""), row.get("date", ""))
 
 
 def _existing_event_keys(sheet) -> set:
     """Collects dedupe keys for every dedupe-eligible row already in the
     sheet (see _DEDUPE_STATUSES)."""
     status_index = OUTPUT_COLUMNS.index("status")
-    source_url_index = OUTPUT_COLUMNS.index("source_url")
     title_index = OUTPUT_COLUMNS.index("title")
     date_index = OUTPUT_COLUMNS.index("date")
 
@@ -136,7 +140,7 @@ def _existing_event_keys(sheet) -> set:
     for row in sheet.iter_rows(min_row=2, values_only=True):
         if not row or row[status_index] not in _DEDUPE_STATUSES:
             continue
-        keys.add((row[source_url_index] or "", row[title_index] or "", row[date_index] or ""))
+        keys.add((row[title_index] or "", row[date_index] or ""))
     return keys
 
 
@@ -267,12 +271,15 @@ def append_rows(path: str, rows: list[dict]) -> None:
     if the model gave it fit_score 1 with high confidence, and everything
     else (including non-"ok" failure/no_events rows) goes to Events. Dedupe-
     eligible rows (see _DEDUPE_STATUSES) are skipped if a row with the same
-    source_url, title, and date is already present in either sheet, so
-    re-running the batch over the same sites does not duplicate events or
-    let one flip between sheets across runs.
+    title and date is already present in either sheet, so re-running the
+    batch over the same sites does not duplicate events or let one flip
+    between sheets across runs - and the same event cross-posted on two
+    different sites now collapses to a single row (see event_key).
 
     Args:
-        path: Path to the output .xlsx file.
+        path: Path to the output .xlsx file. Row dicts may still carry a
+            "source_url" key (e.g. for building a signup_link fallback
+            before this call) - it is simply not written as a column.
         rows: A list of dicts, each keyed by a subset of OUTPUT_COLUMNS plus
             any extra fields used only for dedupe (e.g. the event's "date").
     """
@@ -321,6 +328,223 @@ def read_existing_event_keys(path: str) -> set:
         _validate_header(sheet)
         keys |= _existing_event_keys(sheet)
     return keys
+
+
+# --- Past-event archival -----------------------------------------------------
+#
+# archive_past_events moves any event that has aged into the past out of the
+# live Events/Rejected Events sheets into a dedicated "past_events" sheet, so
+# the workbook the client actually looks at only ever shows current/upcoming
+# events. It is meant to run at the very start of every batch (see
+# cli.batch.main), before read_existing_event_keys, so dedupe/scoring for
+# that run only ever sees the post-archive state.
+
+# Style attributes that can be assigned directly (openpyxl's style proxy
+# objects can't be shared across cells/workbooks - each needs its own
+# copy.copy()). "number_format" and value are handled separately below:
+# number_format is a plain string (no copy needed), and value obviously
+# isn't a style.
+_STYLE_COPY_ATTRS = ("fill", "font", "border", "alignment", "protection")
+
+
+def _validate_header_prefix(sheet) -> None:
+    """Like _validate_header, but only checks the first len(OUTPUT_HEADERS)
+    cells, tolerating any extra annotation columns a client has typed notes
+    into beyond the standard layout (see archive_past_events - unlike the
+    Events/Rejected Events sheets, past_events is expected to accumulate
+    these over time as archived rows bring their annotations with them).
+    """
+    header = [cell.value for cell in sheet[1]]
+    prefix = header[: len(OUTPUT_HEADERS)]
+    if prefix != OUTPUT_HEADERS:
+        raise RuntimeError(
+            f"Sheet {sheet.title!r} has header {header}, whose first "
+            f"{len(OUTPUT_HEADERS)} column(s) do not match the expected "
+            f"columns {OUTPUT_HEADERS}. Appending would misalign data. "
+            "Regenerate this output file (or migrate its header row to "
+            "match) before running again."
+        )
+
+
+def _copy_cell_fully(source_cell, target_cell) -> None:
+    """Copies a cell's value plus every style/annotation attribute a client
+    might have hand-set: fill, font, border, alignment, number format,
+    protection, comment, and hyperlink.
+
+    openpyxl's style proxy objects (fills, fonts, ...) and Comment objects
+    are mutable and tied to their originating cell/workbook, so each is
+    given its own copy.copy() rather than assigned directly - reusing the
+    same instance across cells corrupts the source cell's formatting once
+    the target is modified (or raises outright for Comment, which refuses
+    to be attached to more than one cell).
+
+    Value is set before the hyperlink: Cell.hyperlink's setter auto-fills
+    a blank cell's value from the hyperlink's target/location, which would
+    incorrectly override a real (possibly different) cell value if set
+    first.
+    """
+    target_cell.value = source_cell.value
+    for attr in _STYLE_COPY_ATTRS:
+        setattr(target_cell, attr, copy.copy(getattr(source_cell, attr)))
+    target_cell.number_format = source_cell.number_format
+    if source_cell.comment is not None:
+        target_cell.comment = copy.copy(source_cell.comment)
+    if source_cell.hyperlink is not None:
+        # The Hyperlink.setter sets `.ref` to the *target* cell's own
+        # coordinate automatically, so the copied object always ends up
+        # correctly addressed regardless of where it came from.
+        target_cell.hyperlink = copy.copy(source_cell.hyperlink)
+
+
+def _rows_before_today(sheet, today: datetime.date) -> list[int]:
+    """Returns the 1-based row numbers (data rows only) whose "date" column
+    holds a real date/datetime strictly before `today`.
+
+    Rows with a blank or unparseable (text) date are left out - never
+    guessed at, per archive_past_events.
+    """
+    date_column = OUTPUT_COLUMNS.index("date") + 1
+    rows = []
+    for row_number in range(2, sheet.max_row + 1):
+        value = sheet.cell(row=row_number, column=date_column).value
+        if isinstance(value, datetime.datetime):
+            value = value.date()
+        elif not isinstance(value, datetime.date):
+            continue
+        if value < today:
+            rows.append(row_number)
+    return rows
+
+
+def _fix_hyperlink_refs(sheet) -> None:
+    """Repoints every surviving cell's hyperlink `.ref` at its own current
+    coordinate.
+
+    openpyxl's Worksheet.delete_rows relocates a shifted cell's value,
+    styles, and comment correctly (it moves the same Cell object and
+    rewrites its .row/.column), but does NOT update the nested
+    Hyperlink.ref string that same cell carries - verified empirically:
+    saving/reloading a sheet after delete_rows shifted a hyperlinked cell
+    left a stale ref (e.g. "B3") pointing at the cell's old position,
+    which Excel/openpyxl then reconstitutes as a phantom cell on reload.
+    Rewriting every remaining hyperlink's ref to cell.coordinate right
+    after any delete_rows call is a minimal, targeted fix for that.
+    """
+    for row in sheet.iter_rows():
+        for cell in row:
+            if cell.hyperlink is not None:
+                cell.hyperlink.ref = cell.coordinate
+
+
+def _move_rows_to_past(source_sheet, row_numbers: list[int], past_sheet) -> None:
+    """Copies each row in row_numbers (full width, with every style/
+    annotation attribute - see _copy_cell_fully) from source_sheet into a
+    freshly appended row on past_sheet, then deletes those rows out of
+    source_sheet.
+
+    Copies the full row width (source_sheet.max_column), not just
+    len(OUTPUT_COLUMNS), so any extra columns the client has typed notes
+    into travel with the row instead of being silently dropped.
+
+    Deletes are issued bottom-up (descending row number) so a row number
+    earlier in the list never shifts out from under a later delete_rows
+    call.
+    """
+    width = source_sheet.max_column
+    for row_number in row_numbers:
+        target_row = past_sheet.max_row + 1
+        for column in range(1, width + 1):
+            _copy_cell_fully(
+                source_sheet.cell(row=row_number, column=column),
+                past_sheet.cell(row=target_row, column=column),
+            )
+        source_height = source_sheet.row_dimensions[row_number].height
+        if source_height is not None:
+            past_sheet.row_dimensions[target_row].height = source_height
+
+    for row_number in sorted(row_numbers, reverse=True):
+        source_sheet.delete_rows(row_number, 1)
+    _fix_hyperlink_refs(source_sheet)
+
+
+def _sync_table_after_deletion(sheet) -> None:
+    """Resizes this sheet's table to match its current row count, or removes
+    the table entirely if deletions emptied the sheet back down to just its
+    header row.
+
+    See _apply_table's docstring for why a header-only ref (e.g. "A1:K1")
+    is invalid per the Excel table spec - _apply_table itself only ever
+    grows/no-ops, so a shrink-to-nothing case has to be handled here
+    instead, or Excel would flag the file as corrupt on open.
+    """
+    if sheet.max_row < 2:
+        for table_name in list(sheet.tables.keys()):
+            del sheet.tables[table_name]
+        return
+    _apply_table(sheet, sheet.max_row)
+
+
+def archive_past_events(path: str) -> int:
+    """Moves every event dated strictly before today out of the Events and
+    Rejected Events sheets into a "past_events" sheet (created if missing),
+    so the live workbook only ever shows current/upcoming events.
+
+    Everything about a moved row is preserved - not just OUTPUT_COLUMNS'
+    fields but the full row width, since the client hand-annotates this
+    workbook (extra note columns, cell highlights, comments, hyperlinks;
+    see _copy_cell_fully/_move_rows_to_past). Rows with a blank or
+    unparseable (text) date are left in place rather than guessed at (see
+    _rows_before_today).
+
+    Meant to run once at the very start of every batch (see cli.batch.main),
+    before read_existing_event_keys, so that call's dedupe keys - and this
+    run's scoring/dedupe generally - only ever see the post-archive state.
+
+    Args:
+        path: Path to the output .xlsx file.
+
+    Returns:
+        The number of rows moved into past_events. Returns 0 (and leaves
+        the file untouched, including not creating past_events) if the file
+        doesn't exist yet or nothing needed to move - so a second call in a
+        row, or a call against a brand-new workbook, is a true no-op.
+    """
+    if not os.path.exists(path):
+        return 0
+
+    workbook = load_workbook(path)
+    today = datetime.date.today()
+
+    moves = []
+    for title in (EVENTS_SHEET_NAME, REJECTED_SHEET_NAME):
+        if title not in workbook.sheetnames:
+            continue
+        sheet = workbook[title]
+        row_numbers = _rows_before_today(sheet, today)
+        if row_numbers:
+            moves.append((sheet, row_numbers))
+
+    total_moved = sum(len(row_numbers) for _, row_numbers in moves)
+    if total_moved == 0:
+        return 0
+
+    if PAST_EVENTS_SHEET_NAME in workbook.sheetnames:
+        past_sheet = workbook[PAST_EVENTS_SHEET_NAME]
+        _validate_header_prefix(past_sheet)
+    else:
+        past_sheet = workbook.create_sheet(PAST_EVENTS_SHEET_NAME)
+        past_sheet.append(OUTPUT_HEADERS)
+
+    for sheet, row_numbers in moves:
+        _move_rows_to_past(sheet, row_numbers, past_sheet)
+        _sync_table_after_deletion(sheet)
+
+    _apply_table(past_sheet, past_sheet.max_row)
+    _autosize_columns(past_sheet, past_sheet.max_row)
+    _apply_date_number_format(past_sheet, past_sheet.max_row)
+
+    workbook.save(path)
+    return total_moved
 
 
 # --- Per-site diagnostic output ---------------------------------------------

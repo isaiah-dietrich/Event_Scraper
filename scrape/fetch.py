@@ -91,6 +91,19 @@ _LOAD_MORE_CLICK_SCRIPT = """
 # size floor rather than a per-vendor allowlist.
 _MIN_FRAME_HTML_CHARS = 500
 
+# A child frame's HTML uses hrefs relative to the *frame's* own URL, not the
+# parent page's. Every captured snapshot is later joined into one string and
+# reduced against a single base_url (the parent page), so a relative event link
+# inside an embedded calendar (e.g. GrowthZone's "/events/details/123") would
+# resolve against the wrong host and reach the spreadsheet as a broken
+# signup_link. Rewriting each frame's relative hrefs to absolute against the
+# frame's own URL *before* joining fixes this; already-absolute and
+# non-navigating hrefs are left untouched (see _absolutize_frame_hrefs).
+_HREF_ATTR_PATTERN = re.compile(r'(\bhref\s*=\s*)(["\'])(.*?)\2', re.IGNORECASE)
+_NON_RELATIVE_HREF_PREFIXES = (
+    "http://", "https://", "//", "#", "javascript:", "mailto:", "tel:", "data:",
+)
+
 # Month-by-month calendar navigation: some calendars render only one month at
 # a time entirely client-side, with no URL or scroll position to key off of -
 # so a single page load only ever sees whichever month opens by default
@@ -205,6 +218,34 @@ def _wait_for_content_to_settle(page) -> str:
     return current_html
 
 
+def _absolutize_frame_hrefs(html: str, base_url: str) -> str:
+    """Rewrites relative hrefs in a frame's HTML to absolute against base_url.
+
+    Captured child frames are joined with the parent page's HTML and later
+    reduced against the *parent's* base_url, so a relative href inside a frame
+    (e.g. an embedded GrowthZone calendar's "/events/details/123") would
+    otherwise resolve against the parent host - the wrong domain - and be
+    written to the spreadsheet as a broken signup_link. Resolving each frame's
+    relative hrefs against the frame's own URL here means reduce's later
+    urljoin against the parent base_url is a no-op on them (an absolute URL
+    joined against any base is itself). Already-absolute, in-page, and
+    non-navigating hrefs (see _NON_RELATIVE_HREF_PREFIXES) are left untouched;
+    the query string's HTML entities (e.g. "&amp;") are preserved for reduce to
+    decode, exactly as for main-frame hrefs.
+    """
+    if not base_url:
+        return html
+
+    def _resolve(match: re.Match) -> str:
+        prefix, quote, value = match.group(1), match.group(2), match.group(3)
+        stripped = value.strip()
+        if not stripped or stripped.lower().startswith(_NON_RELATIVE_HREF_PREFIXES):
+            return match.group(0)
+        return f"{prefix}{quote}{urllib.parse.urljoin(base_url, stripped)}{quote}"
+
+    return _HREF_ATTR_PATTERN.sub(_resolve, html)
+
+
 def _capture_child_frames(page) -> list[str]:
     """Captures the HTML of every non-trivial child frame on the page.
 
@@ -216,6 +257,11 @@ def _capture_child_frames(page) -> list[str]:
     widgets) carry no event text and are skipped. Each read is wrapped
     because a frame can detach between the frames() enumeration and the
     read - a detached frame is simply skipped rather than failing the fetch.
+
+    Each frame's relative hrefs are resolved to absolute against the frame's
+    own URL before it's returned (see _absolutize_frame_hrefs), so relative
+    event links inside embedded calendars survive reduction as usable absolute
+    signup URLs rather than resolving against the parent page's host.
     """
     snapshots = []
     for frame in page.frames:
@@ -229,7 +275,7 @@ def _capture_child_frames(page) -> list[str]:
             continue
         if len(html) < _MIN_FRAME_HTML_CHARS:
             continue
-        snapshots.append(html)
+        snapshots.append(_absolutize_frame_hrefs(html, frame.url))
     return snapshots
 
 
