@@ -44,16 +44,17 @@ TOKEN_USAGE_HISTORY_PATH = "token_usage_history.json"
 
 # Paste site URLs here to test the pipeline without touching websites.xlsx.
 # Run with: python run.py --test
+# Current run costs 40 cents
 TEST_URLS = [
     "https://ai.gatech.edu/events",
-    #"https://members.tagonline.org/calendar",
+    "https://members.tagonline.org/calendar",
     "https://www.georgiamanufacturingalliance.com/events/",
-    #"https://www.aimanufacturingconference.com/",
-    #"https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
-    #"https://luma.com/genai-collective",
-    #"https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1"
-    #"https://atlanta.aitinkerers.org/",
-    #"https://www.meetup.com/atlbitlab/events/"
+    "https://www.aimanufacturingconference.com/",
+    "https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
+    "https://luma.com/genai-collective",
+    "https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1"
+    "https://atlanta.aitinkerers.org/",
+    "https://www.meetup.com/atlbitlab/events/"
 ]
 
 # Each site gets its own browser instance and its own LLM call, run
