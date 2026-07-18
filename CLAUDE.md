@@ -18,13 +18,25 @@ export ANTHROPIC_API_KEY=sk-...
 
 ### Run
 ```
-python run.py                     # scrape websites.xlsx -> events_output.xlsx (append + dedupe)
+python run.py                     # scrape the Websites sheet of Georgia_Event_Tracker.xlsx, append results into the same file (dedupe)
 python run.py --test              # scrape TEST_URLS (cli/batch.py) -> events_output_test.xlsx (always fresh)
-python run.py --fresh             # wipe output before writing instead of append/dedupe
+python run.py --fresh             # clear existing results before writing (Websites input sheet preserved)
 python run.py --per-site          # diagnostic: one sheet per URL -> events_output_by_site.xlsx
-python -m cli.build_spreadsheets  # scaffold a fresh websites.xlsx + empty events_output.xlsx template
+python -m cli.build_spreadsheets  # scaffold a fresh Georgia_Event_Tracker.xlsx (Websites sheet + empty Events/Rejected)
 ```
 Flags combine freely (`--test` picks *which URLs*, `--per-site` picks *the output format* — independent axes). See README.md's combination table for the exact input/output pairing of each combo.
+
+**One combined workbook.** Input and output are the same file,
+`Georgia_Event_Tracker.xlsx`: site URLs are read from its editable **Websites**
+sheet (a single-column Excel Table the client maintains, kept as the last tab)
+and results are appended into its Events / Rejected Events / past_events
+sheets. This is a shared file — the client adds/removes tracked sites in the
+Websites sheet and highlights rows they've added, so nothing outside the Events
+result columns (their highlights, extra note columns, the whole Websites sheet)
+may be clobbered by a run. See `utility/io_excel.py`:
+`read_input_urls`/`create_websites_sheet`/`_move_websites_sheet_last`, and
+`reset_result_sheets` (what `--fresh` uses so it wipes only results, never the
+Websites sheet).
 
 No automated test suite is maintained on `main` (it lives on the `tests` branch instead) — verify changes by running the pipeline directly (e.g. `python run.py --test` or `--per-site`).
 
@@ -50,4 +62,4 @@ Details worth knowing before touching any one stage:
 - Normal mode (`append_rows`): the permanent, deduped Events/Rejected Events workbook.
 - `--per-site` (`write_per_site_sheets`): diagnostic-only, one sheet per URL with every row type (ok / rejected / failed / no_events) together and unsplit, always rebuilt from scratch — for eyeballing extraction/scoring accuracy site-by-site. Sheet and table names are sanitized/deduped from the URL (`_unique_sheet_title`, `_unique_table_name`) to satisfy Excel's naming rules.
 
-`TEST_URLS` (top of `cli/batch.py`) is the scratch list used by `--test` — edit it directly to try new sites without touching `websites.xlsx` or `events_output.xlsx`.
+`TEST_URLS` (top of `cli/batch.py`) is the scratch list used by `--test` — edit it directly to try new sites without touching the tracker workbook's Websites sheet. (`--test` writes to a throwaway `events_output_test.xlsx`, which has no Websites sheet.)

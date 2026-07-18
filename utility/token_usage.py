@@ -92,8 +92,8 @@ def check_and_record_usage(usage_tracker: TokenUsageTracker, path: str, mode: st
     if it grew by more than ALERT_THRESHOLD. A run is only ever compared
     against past runs of the *same* mode - e.g. "--test" only scrapes a
     handful of scratch URLs (see cli.batch.TEST_URLS) and would otherwise
-    look like a huge, meaningless swing against a full run over
-    websites.xlsx, or vice versa. The first run of a given mode has nothing
+    look like a huge, meaningless swing against a full run over the tracker's
+    Websites sheet, or vice versa. The first run of a given mode has nothing
     to compare against, so it's just recorded without an alert.
 
     Args:

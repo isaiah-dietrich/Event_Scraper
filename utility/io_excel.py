@@ -11,6 +11,7 @@ import re
 
 from openpyxl import load_workbook
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table
@@ -21,6 +22,18 @@ TABLE_STYLE = "TableStyleMedium2"  # Built-in blue header, white/light-blue band
 EVENTS_SHEET_NAME = "Events"
 REJECTED_SHEET_NAME = "Rejected Events"
 PAST_EVENTS_SHEET_NAME = "past_events"
+
+# The input site list now lives in a "Websites" sheet inside the same workbook
+# the pipeline writes its results into (Georgia_Event_Tracker.xlsx), so the
+# client can add/remove tracked sites in the one shared file they already look
+# at - see read_input_urls / create_websites_sheet. This sheet is deliberately
+# kept as the last (rightmost) tab so results stay front-and-center; see
+# _move_websites_sheet_last.
+WEBSITES_SHEET_NAME = "Websites"
+WEBSITES_HEADER = "Website URL"
+# Excel table displayName: word-characters only, workbook-unique. "Websites"
+# doesn't collide with the Events/Rejected tables (EventsTable/etc.).
+WEBSITES_TABLE_NAME = "Websites"
 
 # Statuses whose rows participate in cross-run dedupe (see _event_key,
 # _existing_event_keys, _append_to_sheet).
@@ -74,14 +87,24 @@ _AUTOSIZE_PADDING = 2
 _DATE_COLUMN_NUMBER_FORMAT = "mmmm d, yyyy"
 
 
-def read_input_urls(path: str) -> list[str]:
-    """Reads site URLs from an input spreadsheet's first column.
+def read_input_urls(path: str, sheet_name: str = WEBSITES_SHEET_NAME) -> list[str]:
+    """Reads site URLs from the workbook's Websites sheet (first column).
+
+    The input site list now lives in a "Websites" sheet inside the combined
+    Georgia_Event_Tracker.xlsx (which also holds the Events/Rejected output),
+    so this reads that named sheet rather than workbook.active - in a
+    multi-sheet workbook `active` is whatever tab was last selected, not
+    reliably the sites list. Falls back to workbook.active when the named
+    sheet is absent, so a plain single-sheet input file still works.
 
     Args:
         path: Path to the input .xlsx file. The header row is skipped.
+        sheet_name: Sheet to read URLs from (defaults to the Websites sheet).
 
     Returns:
-        A list of non-empty URL strings.
+        A list of non-empty URL strings, whitespace-stripped and deduplicated
+        while preserving first-seen order (a client hand-editing the sheet may
+        paste the same site twice; scraping it once is enough).
 
     Raises:
         FileNotFoundError: If no spreadsheet exists at the given path.
@@ -89,12 +112,84 @@ def read_input_urls(path: str) -> list[str]:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Input spreadsheet not found: {path}")
     workbook = load_workbook(path)
-    sheet = workbook.active
+    sheet = workbook[sheet_name] if sheet_name in workbook.sheetnames else workbook.active
     urls = []
+    seen = set()
     for row in sheet.iter_rows(min_row=2, values_only=True):
-        if row and row[0]:
-            urls.append(str(row[0]).strip())
+        if not row or not row[0]:
+            continue
+        url = str(row[0]).strip()
+        if url and url.lower() not in seen:
+            seen.add(url.lower())
+            urls.append(url)
     return urls
+
+
+def create_websites_sheet(workbook, urls: list[str]):
+    """Creates (or replaces) the editable "Websites" input sheet in a workbook.
+
+    This is the client-facing control surface: a single-column Excel Table of
+    site URLs they add to / remove from directly in the shared workbook, read
+    back by read_input_urls on the next run. Building it as a Table (not bare
+    cells) gives it the same banded style as the results sheets and lets Excel
+    auto-extend it as the client types new rows.
+
+    A header comment spells out how to use it, the tab is tinted green to stand
+    out as the one editable input among the read-only results tabs, and the
+    header row is frozen so it stays visible while scrolling a long list.
+
+    Args:
+        workbook: An openpyxl Workbook to add the sheet to. Any pre-existing
+            sheet of the same name is removed first so this is idempotent.
+        urls: Seed URLs to populate, one per row (may be empty).
+
+    Returns:
+        The created worksheet.
+    """
+    if WEBSITES_SHEET_NAME in workbook.sheetnames:
+        del workbook[WEBSITES_SHEET_NAME]
+    sheet = workbook.create_sheet(WEBSITES_SHEET_NAME)
+    sheet.append([WEBSITES_HEADER])
+    for url in urls:
+        sheet.append([url])
+
+    # A table ref must span at least one row below the header (see _apply_table
+    # for why a header-only ref corrupts the file), so only wrap it in a Table
+    # once there's a seed URL. An empty list just leaves a plain header the
+    # client can start typing under.
+    if sheet.max_row >= 2:
+        table = Table(displayName=WEBSITES_TABLE_NAME, ref=f"A1:A{sheet.max_row}")
+        table.tableStyleInfo = TableStyleInfo(
+            name=TABLE_STYLE, showRowStripes=True, showFirstColumn=False
+        )
+        sheet.add_table(table)
+
+    sheet.column_dimensions["A"].width = 60
+    sheet.freeze_panes = "A2"
+    sheet.sheet_properties.tabColor = "1F7A3D"  # green - the one editable input tab
+    sheet["A1"].comment = Comment(
+        "Add or remove site URLs here - one per row. Saved edits are picked up "
+        "on the next run.",
+        "Georgia Event Tracker",
+    )
+    return sheet
+
+
+def _move_websites_sheet_last(workbook) -> None:
+    """Moves the Websites sheet to the last (rightmost) tab, if it exists.
+
+    Keeps the client's edit surface out of the way of the results tabs after
+    any structural change - notably archive_past_events creating the
+    past_events sheet via create_sheet, which appends it at the end and would
+    otherwise land it to the right of Websites. A no-op when there's no
+    Websites sheet (the --test / --per-site outputs never have one).
+    """
+    if WEBSITES_SHEET_NAME not in workbook.sheetnames:
+        return
+    index = workbook.sheetnames.index(WEBSITES_SHEET_NAME)
+    offset = len(workbook.sheetnames) - 1 - index
+    if offset:
+        workbook.move_sheet(WEBSITES_SHEET_NAME, offset=offset)
 
 
 def _is_rejected(row: dict) -> bool:
@@ -299,6 +394,7 @@ def append_rows(path: str, rows: list[dict]) -> None:
     skipped_count = _append_to_sheet(events_sheet, normal_rows, existing_keys)
     skipped_count += _append_to_sheet(rejected_sheet, rejected_rows, existing_keys)
 
+    _move_websites_sheet_last(workbook)
     workbook.save(path)
     if skipped_count:
         print(f"Skipped {skipped_count} duplicate event(s) already in {path}")
@@ -328,6 +424,33 @@ def read_existing_event_keys(path: str) -> set:
         _validate_header(sheet)
         keys |= _existing_event_keys(sheet)
     return keys
+
+
+def reset_result_sheets(path: str) -> None:
+    """Wipes only the result sheets from the workbook, preserving Websites.
+
+    This is what `--fresh` uses now that input and output share one file:
+    blindly deleting the whole file (the old behavior) would take the client's
+    Websites input sheet down with it. Removes the Events / Rejected Events /
+    past_events sheets so append_rows rebuilds them empty, while leaving the
+    Websites sheet - and any other sheet the client added - untouched.
+
+    If removing the result sheets would leave the workbook with no sheets at
+    all (e.g. a results-only file that never had a Websites sheet), the whole
+    file is removed instead, matching the old wipe-and-recreate behavior. A
+    no-op if the file doesn't exist.
+    """
+    if not os.path.exists(path):
+        return
+    workbook = load_workbook(path)
+    for title in (EVENTS_SHEET_NAME, REJECTED_SHEET_NAME, PAST_EVENTS_SHEET_NAME):
+        if title in workbook.sheetnames:
+            del workbook[title]
+    if not workbook.sheetnames:
+        os.remove(path)
+        return
+    _move_websites_sheet_last(workbook)
+    workbook.save(path)
 
 
 # --- Past-event archival -----------------------------------------------------
@@ -543,6 +666,7 @@ def archive_past_events(path: str) -> int:
     _autosize_columns(past_sheet, past_sheet.max_row)
     _apply_date_number_format(past_sheet, past_sheet.max_row)
 
+    _move_websites_sheet_last(workbook)
     workbook.save(path)
     return total_moved
 

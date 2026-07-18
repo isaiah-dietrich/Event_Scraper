@@ -1,8 +1,9 @@
-"""Batch CLI: scrape every site in an input spreadsheet and append results.
+"""Batch CLI: scrape every site in the tracker workbook and append results.
 
-Reads site URLs from INPUT_PATH, runs the fetch/reduce/extract/score
-pipeline against each one concurrently, and appends the results to
-OUTPUT_PATH.
+Reads site URLs from the "Websites" sheet of INPUT_PATH, runs the
+fetch/reduce/extract/score pipeline against each one concurrently, and appends
+the results back into the same workbook (Events / Rejected Events sheets).
+Input and output are the one shared Georgia_Event_Tracker.xlsx.
 """
 
 import datetime
@@ -25,12 +26,18 @@ from utility.io_excel import archive_past_events
 from utility.io_excel import event_key
 from utility.io_excel import read_existing_event_keys
 from utility.io_excel import read_input_urls
+from utility.io_excel import reset_result_sheets
 from utility.io_excel import write_per_site_sheets
 from utility.token_usage import check_and_record_usage
 from utility.token_usage import tracker as token_usage_tracker
 
-INPUT_PATH = "websites.xlsx"
-OUTPUT_PATH = "events_output.xlsx"
+# Input and output are now the same shared workbook: site URLs are read from
+# its "Websites" sheet and results are appended to its Events/Rejected Events
+# sheets (see utility.io_excel). INPUT_PATH/OUTPUT_PATH are kept as separate
+# names only so the read-vs-write intent stays readable at each call site.
+TRACKER_PATH = "Georgia_Event_Tracker.xlsx"
+INPUT_PATH = TRACKER_PATH
+OUTPUT_PATH = TRACKER_PATH
 TEST_OUTPUT_PATH = "events_output_test.xlsx"
 
 # Diagnostic-only output for --per-site (see main()): one sheet per URL, so a
@@ -43,9 +50,8 @@ PER_SITE_OUTPUT_PATH = "events_output_by_site.xlsx"
 # silently costing more than expected.
 TOKEN_USAGE_HISTORY_PATH = "token_usage_history.json"
 
-# Paste site URLs here to test the pipeline without touching websites.xlsx.
-# Run with: python run.py --test
-# Current run costs 40 cents
+# Paste site URLs here to test the pipeline without touching the tracker
+# workbook's Websites sheet. Run with: python run.py --test
 TEST_URLS = [
     "https://ai.gatech.edu/events",
     "https://members.tagonline.org/calendar",
@@ -465,7 +471,7 @@ def main() -> None:
     # so token usage is only ever compared against past runs of the same
     # shape - "--test" scrapes a handful of scratch URLs (TEST_URLS) and
     # would otherwise look like a nonsensical swing against a full run over
-    # websites.xlsx, or vice versa. --fresh doesn't get its own label since
+    # the Websites sheet, or vice versa. --fresh doesn't get its own label since
     # it only changes whether output is wiped first, not which URLs/output
     # format are used.
     usage_mode = ("test_" if test_mode else "") + ("per_site" if per_site_mode else "normal")
@@ -478,7 +484,12 @@ def main() -> None:
         try:
             urls = read_input_urls(INPUT_PATH)
         except FileNotFoundError as error:
-            print(f"ERROR: {error}", file=sys.stderr)
+            print(
+                f"ERROR: {error}\n"
+                "Scaffold a fresh tracker workbook with: "
+                "python -m cli.build_spreadsheets",
+                file=sys.stderr,
+            )
             sys.exit(1)
         output_path = OUTPUT_PATH
         source = INPUT_PATH
@@ -487,8 +498,17 @@ def main() -> None:
     # instead of output_path, so there's nothing to clear out here for it -
     # write_per_site_sheets always starts from a blank workbook on its own.
     if (fresh_mode or test_mode) and not per_site_mode and os.path.exists(output_path):
-        os.remove(output_path)
-        print(f"Removed existing {output_path}")
+        if test_mode:
+            # The --test output is a throwaway standalone file (no Websites
+            # sheet), so wiping the whole thing is correct and simplest.
+            os.remove(output_path)
+            print(f"Removed existing {output_path}")
+        else:
+            # --fresh on the combined tracker must clear only the result
+            # sheets, never the whole file - the client's Websites input sheet
+            # lives in the same workbook and would otherwise be destroyed.
+            reset_result_sheets(output_path)
+            print(f"Cleared existing results from {output_path} (Websites sheet preserved)")
 
     if not urls:
         print(f"No URLs found in {source}. Nothing to do.")
