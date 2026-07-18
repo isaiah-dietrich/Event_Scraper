@@ -10,6 +10,7 @@ __pycache__/
 ~$*.xlsx
 events.json
 token_usage_history.json
-README.md
-.gitignore
+events_output_by_site.xlsx
+events_output_test.xlsx
+.playwright-mcp/
 
