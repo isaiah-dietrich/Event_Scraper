@@ -1,0 +1,15 @@
+api_keys
+.env
+venv/
+already/
+exists/
+\#/
+__pycache__/
+*.pyc
+.DS_Store
+~$*.xlsx
+events.json
+token_usage_history.json
+README.md
+.gitignore
+
