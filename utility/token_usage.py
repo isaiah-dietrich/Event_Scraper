@@ -99,8 +99,8 @@ def check_and_record_usage(usage_tracker: TokenUsageTracker, path: str, mode: st
     Args:
         usage_tracker: This run's TokenUsageTracker.
         path: Path to the JSON history file (created if missing).
-        mode: A label for which kind of run this is (e.g. "normal", "test",
-            "per_site") - see cli.batch.main for how it's derived from CLI
+        mode: A label for which kind of run this is (e.g. "normal",
+            "test_normal") - see cli.batch.main for how it's derived from CLI
             flags.
     """
     history = _load_history(path)

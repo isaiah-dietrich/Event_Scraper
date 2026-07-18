@@ -52,24 +52,9 @@ python run.py [flags]
 |---|---|
 | *(none)* | Scrapes every URL in the Websites sheet of `Georgia_Event_Tracker.xlsx` and appends results back into the same file. |
 | `--test` | Scrapes the hardcoded `TEST_URLS` list in [cli/batch.py](cli/batch.py) instead of the Websites sheet, writing to a throwaway `events_output_test.xlsx` instead. Lets you iterate without touching the real tracker file. Existing `events_output_test.xlsx` is deleted before the run (always fresh). |
-| `--fresh` | Clears existing results (Events / Rejected Events / past_events) before writing, instead of appending/deduping onto whatever's already there. The editable Websites input sheet is preserved. Only meaningful without `--per-site` (see below); combined with `--test` it's redundant since `--test` already clears its output every run. |
-| `--per-site` | **Testing only.** Instead of the normal combined Events/Rejected Events workbook, writes one sheet per URL to a separate file, `events_output_by_site.xlsx`, with every row for that site (good, rejected, failed, no_events) together and unsplit — useful for eyeballing extraction/scoring accuracy site-by-site. Always overwrites `events_output_by_site.xlsx` from scratch and never touches `events_output.xlsx`/`events_output_test.xlsx`, so `--fresh` has no effect when combined with it. |
+| `--fresh` | Clears existing results (Events / Rejected Events / past_events) before writing, instead of appending/deduping onto whatever's already there. The editable Websites input sheet is preserved. Combined with `--test` it's redundant, since `--test` already clears its output every run. |
 
-Flags combine freely. `--test` and `--per-site` are independent axes:
-`--test` picks *which URLs* get scraped, `--per-site` picks *the output
-format*.
-
-### Combinations
-
-| Command | URLs scraped | Output |
-|---|---|---|
-| `python run.py` | Websites sheet | `Georgia_Event_Tracker.xlsx` (Events / Rejected Events sheets, appended + deduped) |
-| `python run.py --fresh` | Websites sheet | `Georgia_Event_Tracker.xlsx`, result sheets cleared and rebuilt (Websites sheet preserved) |
-| `python run.py --test` | `TEST_URLS` | `events_output_test.xlsx`, wiped and rebuilt every run |
-| `python run.py --per-site` | Websites sheet | `events_output_by_site.xlsx` (one sheet per URL) |
-| `python run.py --test --per-site` | `TEST_URLS` | `events_output_by_site.xlsx` (one sheet per URL) |
-| `python run.py --fresh --per-site` | Websites sheet | `events_output_by_site.xlsx` (`--fresh` is a no-op here) |
-| `python run.py --test --fresh --per-site` | `TEST_URLS` | `events_output_by_site.xlsx` (`--fresh` is a no-op here) |
+Flags combine freely: `python run.py --test --fresh`.
 
 ## Other entry points
 
@@ -99,6 +84,3 @@ Input and output live in this one shared file (the client edits it too):
 
 Rows are deduped across runs on `(title, date)`, so the same event
 cross-posted on two sites collapses to one row.
-
-`events_output_by_site.xlsx` — separate diagnostic-only output from
-`--per-site`, one sheet per URL, always rebuilt from scratch.

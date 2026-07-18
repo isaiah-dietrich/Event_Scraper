@@ -6,10 +6,7 @@ Usage:
     python run.py --test       # process cli/batch.py's TEST_URLS instead
     python run.py --fresh      # clear existing results before writing (the
                                 # Websites input sheet is preserved)
-    python run.py --per-site   # testing only: write one sheet per URL to
-                                # events_output_by_site.xlsx instead of the
-                                # normal combined Events/Rejected workbook
-    python run.py --test --fresh --per-site  # flags combine freely
+    python run.py --test --fresh  # flags combine freely
 """
 
 from cli.batch import main

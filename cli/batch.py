@@ -27,7 +27,6 @@ from utility.io_excel import event_key
 from utility.io_excel import read_existing_event_keys
 from utility.io_excel import read_input_urls
 from utility.io_excel import reset_result_sheets
-from utility.io_excel import write_per_site_sheets
 from utility.token_usage import check_and_record_usage
 from utility.token_usage import tracker as token_usage_tracker
 
@@ -39,11 +38,6 @@ TRACKER_PATH = "Georgia_Event_Tracker.xlsx"
 INPUT_PATH = TRACKER_PATH
 OUTPUT_PATH = TRACKER_PATH
 TEST_OUTPUT_PATH = "events_output_test.xlsx"
-
-# Diagnostic-only output for --per-site (see main()): one sheet per URL, so a
-# run's accuracy can be checked site-by-site. Not the permanent output format
-# - that's still the single Events/Rejected Events workbook via append_rows.
-PER_SITE_OUTPUT_PATH = "events_output_by_site.xlsx"
 
 # Log of every run's token usage (see utility.token_usage), so a run that
 # uses much more than the last one of the same mode gets flagged instead of
@@ -377,8 +371,7 @@ def process_site(
             dropped before scoring - no scoring call, no output row - since
             write-time dedupe in append_rows would silently drop its row
             anyway, so scoring it first would only have been wasted API
-            cost. Defaults to an empty set so existing callers, and the
-            --per-site diagnostic path in particular, are unaffected.
+            cost. Defaults to an empty set so existing callers are unaffected.
 
     Returns:
         A list of output row dicts: one per extracted event on success, or
@@ -465,7 +458,6 @@ def main() -> None:
 
     test_mode = "--test" in sys.argv
     fresh_mode = "--fresh" in sys.argv
-    per_site_mode = "--per-site" in sys.argv
 
     # Labels which output shape this run produced (see check_and_record_usage)
     # so token usage is only ever compared against past runs of the same
@@ -474,7 +466,7 @@ def main() -> None:
     # the Websites sheet, or vice versa. --fresh doesn't get its own label since
     # it only changes whether output is wiped first, not which URLs/output
     # format are used.
-    usage_mode = ("test_" if test_mode else "") + ("per_site" if per_site_mode else "normal")
+    usage_mode = "test_normal" if test_mode else "normal"
 
     if test_mode:
         urls = TEST_URLS
@@ -494,10 +486,7 @@ def main() -> None:
         output_path = OUTPUT_PATH
         source = INPUT_PATH
 
-    # --per-site writes to its own dedicated file (see PER_SITE_OUTPUT_PATH)
-    # instead of output_path, so there's nothing to clear out here for it -
-    # write_per_site_sheets always starts from a blank workbook on its own.
-    if (fresh_mode or test_mode) and not per_site_mode and os.path.exists(output_path):
+    if (fresh_mode or test_mode) and os.path.exists(output_path):
         if test_mode:
             # The --test output is a throwaway standalone file (no Websites
             # sheet), so wiping the whole thing is correct and simplest.
@@ -518,11 +507,10 @@ def main() -> None:
     # Events into the "past_events" sheet before this run reads/dedupes
     # against the workbook, so both read_existing_event_keys below and the
     # client's view of the live sheets only ever reflect current/upcoming
-    # events. Skipped for --per-site (its own diagnostic file, not
-    # output_path). Not skipped for --test: harmless (that mode just wiped
-    # its output file above, so os.path.exists is already False there) but
-    # kept unconditional across both append-mode paths for consistency.
-    if not per_site_mode and os.path.exists(output_path):
+    # events. Not skipped for --test: harmless (that mode just wiped its
+    # output file above, so os.path.exists is already False there) but kept
+    # unconditional for consistency.
+    if os.path.exists(output_path):
         archived_count = archive_past_events(output_path)
         if archived_count:
             print(f"Archived {archived_count} past event(s) to 'past_events' in {output_path}")
@@ -531,16 +519,12 @@ def main() -> None:
     # workbook (a no-op empty set on a fresh/just-wiped file) so process_site
     # can skip a Haiku scoring call for any of them entirely, instead of
     # scoring them only to have write-time dedupe in append_rows silently
-    # drop the row anyway. Skipped for --per-site: that mode writes to its
-    # own diagnostic file, not output_path, and its whole point is showing
-    # fresh scoring for every event on every run (see CLAUDE.md), so it must
-    # never be handed a nonempty known_keys.
-    known_keys = frozenset() if per_site_mode else frozenset(read_existing_event_keys(output_path))
+    # drop the row anyway.
+    known_keys = frozenset(read_existing_event_keys(output_path))
 
     print(f"Processing {len(urls)} site(s) from {source} (up to {MAX_WORKERS} at a time)...")
 
     all_rows = []
-    rows_by_url = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_url = {
             executor.submit(process_site, client, url, known_keys): url for url in urls
@@ -561,16 +545,9 @@ def main() -> None:
                 suffix = f": {row.get('title')}" if row["status"] == "ok" else ""
                 print(f"    -> {row['status']}{suffix}")
             all_rows.extend(rows)
-            rows_by_url[url] = rows
 
-    if per_site_mode:
-        # Written in the original URL order (not completion order) for
-        # readability, since as_completed() finishes them out of order.
-        write_per_site_sheets(PER_SITE_OUTPUT_PATH, {url: rows_by_url[url] for url in urls})
-        print(f"\nWrote {len(urls)} site sheet(s) to {PER_SITE_OUTPUT_PATH}")
-    else:
-        append_rows(output_path, all_rows)
-        print(f"\nAppended {len(all_rows)} row(s) to {output_path}")
+    append_rows(output_path, all_rows)
+    print(f"\nAppended {len(all_rows)} row(s) to {output_path}")
 
     print(f"Token usage: {token_usage_tracker.summary()}")
     check_and_record_usage(token_usage_tracker, TOKEN_USAGE_HISTORY_PATH, usage_mode)
