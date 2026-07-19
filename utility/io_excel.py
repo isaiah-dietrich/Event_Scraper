@@ -374,6 +374,12 @@ def append_rows(path: str, rows: list[dict]) -> None:
         rows: A list of dicts, each keyed by a subset of OUTPUT_COLUMNS plus
             any extra fields used only for dedupe (e.g. the event's "date").
     """
+    # TODO: once this file lives on OneDrive and is co-edited by the client,
+    # record os.path.getmtime(path) here (if it exists) and re-check it right
+    # before workbook.save() below - if it changed in between, someone else
+    # wrote to the file during this run. On conflict, save to a separate
+    # timestamped file instead of overwriting, rather than silently clobbering
+    # their edits.
     if os.path.exists(path):
         workbook = load_workbook(path)
     else:
@@ -391,6 +397,7 @@ def append_rows(path: str, rows: list[dict]) -> None:
     skipped_count += _append_to_sheet(rejected_sheet, rejected_rows, existing_keys)
 
     _move_websites_sheet_last(workbook)
+    # TODO: mtime conflict check goes here, right before the save.
     workbook.save(path)
     if skipped_count:
         print(f"Skipped {skipped_count} duplicate event(s) already in {path}")
@@ -631,6 +638,9 @@ def archive_past_events(path: str) -> int:
     if not os.path.exists(path):
         return 0
 
+    # TODO: same mtime-based conflict check as append_rows belongs here too -
+    # record os.path.getmtime(path) now, re-check right before workbook.save()
+    # below, and on a mismatch save to a separate file instead of overwriting.
     workbook = load_workbook(path)
     today = datetime.date.today()
 
@@ -663,5 +673,6 @@ def archive_past_events(path: str) -> int:
     _apply_date_number_format(past_sheet, past_sheet.max_row)
 
     _move_websites_sheet_last(workbook)
+    # TODO: mtime conflict check goes here, right before the save.
     workbook.save(path)
     return total_moved
