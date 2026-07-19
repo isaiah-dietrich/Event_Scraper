@@ -1,9 +1,15 @@
-"""Batch CLI: scrape every site in the tracker workbook and append results.
+"""Batch CLI: the weekly event-digest run (`python run.py`).
 
-Reads site URLs from the "Websites" sheet of INPUT_PATH, runs the
-fetch/reduce/extract/score pipeline against each one concurrently, and appends
-the results back into the same workbook (Events / Rejected Events sheets).
-Input and output are the one shared Georgia_Event_Tracker.xlsx.
+Scrapes the hardcoded SITE_URLS list through the
+fetch/reduce/extract/score pipeline concurrently, dedupes each site's events
+against an internal append-only master workbook (MASTER_PATH) so only events
+not seen in a prior run survive, writes a standalone weekly digest .xlsx of
+just those new events (DIGEST_DIR), records the new events into the master,
+and emails the digest to the client with a per-site status line for each URL.
+
+This is a manual, once-a-week run. The master workbook is internal state (a
+seen-events store) and is never sent to or edited by the client; the client
+only ever receives the dated weekly digest file.
 """
 
 import datetime
@@ -21,41 +27,42 @@ from scrape.extract import extract_events
 from scrape.fetch import fetch_rendered_html
 from scrape.reduce import reduce_html
 from scrape.score import score_event
+from utility.email_digest import send_weekly_digest
 from utility.io_excel import append_rows
-from utility.io_excel import archive_past_events
 from utility.io_excel import event_key
 from utility.io_excel import read_existing_event_keys
-from utility.io_excel import read_input_urls
-from utility.io_excel import reset_result_sheets
+from utility.io_excel import write_weekly_digest
 from utility.token_usage import check_and_record_usage
 from utility.token_usage import tracker as token_usage_tracker
 
-# Input and output are now the same shared workbook: site URLs are read from
-# its "Websites" sheet and results are appended to its Events/Rejected Events
-# sheets (see utility.io_excel). INPUT_PATH/OUTPUT_PATH are kept as separate
-# names only so the read-vs-write intent stays readable at each call site.
-TRACKER_PATH = "Georgia_Event_Tracker.xlsx"
-INPUT_PATH = TRACKER_PATH
-OUTPUT_PATH = TRACKER_PATH
-TEST_OUTPUT_PATH = "events_output_test.xlsx"
+# Internal append-only seen-events store: every new event this run finds is
+# recorded here, and each run dedupes against it so the client only ever gets
+# events they haven't seen before. Never sent to or edited by the client.
+MASTER_PATH = "events_master.xlsx"
+
+# Where each run's dated digest (only the week's NEW events) is written. Kept
+# on disk so a run whose email failed to send can be re-sent manually from the
+# saved file - one file per run, named by date.
+DIGEST_DIR = "weekly_digests"
 
 # Log of every run's token usage (see utility.token_usage), so a run that
 # uses much more than the last one of the same mode gets flagged instead of
 # silently costing more than expected.
 TOKEN_USAGE_HISTORY_PATH = "token_usage_history.json"
 
-# Paste site URLs here to test the pipeline without touching the tracker
-# workbook's Websites sheet. Run with: python run.py --test
-TEST_URLS = [
+# THE production site list scraped every weekly run. Edit it directly when
+# the client replies asking for sites to be added or removed. (Commented-out
+# entries are intentionally toggled off by hand - leave them as-is.)
+SITE_URLS = [
     "https://ai.gatech.edu/events",
     "https://members.tagonline.org/calendar",
-    "https://www.georgiamanufacturingalliance.com/events/",
-    "https://www.aimanufacturingconference.com/",
-    "https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
-    "https://luma.com/genai-collective",
-    "https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1",
-    "https://atlanta.aitinkerers.org/",
-    "https://www.meetup.com/atlbitlab/events/"
+    #"https://www.georgiamanufacturingalliance.com/events/",
+    #"https://www.aimanufacturingconference.com/",
+    #"https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
+    #"https://luma.com/genai-collective",
+    #"https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1",
+    #"https://atlanta.aitinkerers.org/",
+    #"https://www.meetup.com/atlbitlab/events/"
 ]
 
 # Each site gets its own browser instance and its own LLM call, run
@@ -448,86 +455,54 @@ def process_site(
     return rows
 
 
+def _site_status_line(rows: list[dict]) -> str:
+    """Derives one human-readable status line for a site from its rows.
+
+    Mirrors what process_site can return for a single site:
+      - one or more "ok" rows        -> "N new event(s)"
+      - [] (all events already known/filtered) or a lone "no_events" row
+                                      -> "no new events"
+      - a lone "failed: ..." row     -> "FAILED: <reason after 'failed: '>"
+    A site that produced "ok" rows can never also carry a failed row, so the
+    new-event count takes precedence and the branches don't overlap.
+    """
+    new_count = sum(1 for row in rows if row.get("status") == "ok")
+    if new_count:
+        return f"{new_count} new event(s)"
+    if len(rows) == 1 and str(rows[0].get("status", "")).startswith("failed"):
+        reason = str(rows[0]["status"]).split("failed:", 1)[-1].strip()
+        return f"FAILED: {reason}"
+    return "no new events"
+
+
 def main() -> None:
-    """Runs the batch pipeline over every URL in INPUT_PATH."""
+    """Runs the weekly digest pipeline over every URL in SITE_URLS.
+
+    Scrapes each site, dedupes against the internal master workbook, writes a
+    dated digest of only the new events, records them into the master, then
+    emails the digest to the client. `--no-email` prints the email instead of
+    sending it.
+    """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         print("ERROR: ANTHROPIC_API_KEY environment variable is not set.", file=sys.stderr)
         sys.exit(1)
     client = Anthropic(api_key=api_key)
 
-    test_mode = "--test" in sys.argv
-    fresh_mode = "--fresh" in sys.argv
+    no_email = "--no-email" in sys.argv
 
-    # Labels which output shape this run produced (see check_and_record_usage)
-    # so token usage is only ever compared against past runs of the same
-    # shape - "--test" scrapes a handful of scratch URLs (TEST_URLS) and
-    # would otherwise look like a nonsensical swing against a full run over
-    # the Websites sheet, or vice versa. --fresh doesn't get its own label since
-    # it only changes whether output is wiped first, not which URLs/output
-    # format are used.
-    usage_mode = "test_normal" if test_mode else "normal"
+    # Pre-scoring dedupe: load which events are already in the master workbook
+    # (an empty set if the file doesn't exist yet - a first run is naturally
+    # all-new) so process_site can skip a Haiku scoring call for any event
+    # already recorded, instead of scoring it only to have it deduped away.
+    known_keys = frozenset(read_existing_event_keys(MASTER_PATH))
 
-    if test_mode:
-        urls = TEST_URLS
-        output_path = TEST_OUTPUT_PATH
-        source = "TEST_URLS"
-    else:
-        try:
-            urls = read_input_urls(INPUT_PATH)
-        except FileNotFoundError as error:
-            print(
-                f"ERROR: {error}\n"
-                "Scaffold a fresh tracker workbook with: "
-                "python -m cli.build_spreadsheets",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        output_path = OUTPUT_PATH
-        source = INPUT_PATH
+    print(f"Processing {len(SITE_URLS)} site(s) (up to {MAX_WORKERS} at a time)...")
 
-    if (fresh_mode or test_mode) and os.path.exists(output_path):
-        if test_mode:
-            # The --test output is a throwaway standalone file (no Websites
-            # sheet), so wiping the whole thing is correct and simplest.
-            os.remove(output_path)
-            print(f"Removed existing {output_path}")
-        else:
-            # --fresh on the combined tracker must clear only the result
-            # sheets, never the whole file - the client's Websites input sheet
-            # lives in the same workbook and would otherwise be destroyed.
-            reset_result_sheets(output_path)
-            print(f"Cleared existing results from {output_path} (Websites sheet preserved)")
-
-    if not urls:
-        print(f"No URLs found in {source}. Nothing to do.")
-        sys.exit(0)
-
-    # Archive any event that's aged into the past out of Events/Rejected
-    # Events into the "past_events" sheet before this run reads/dedupes
-    # against the workbook, so both read_existing_event_keys below and the
-    # client's view of the live sheets only ever reflect current/upcoming
-    # events. Not skipped for --test: harmless (that mode just wiped its
-    # output file above, so os.path.exists is already False there) but kept
-    # unconditional for consistency.
-    if os.path.exists(output_path):
-        archived_count = archive_past_events(output_path)
-        if archived_count:
-            print(f"Archived {archived_count} past event(s) to 'past_events' in {output_path}")
-
-    # Pre-scoring dedupe: load which events are already in the output
-    # workbook (a no-op empty set on a fresh/just-wiped file) so process_site
-    # can skip a Haiku scoring call for any of them entirely, instead of
-    # scoring them only to have write-time dedupe in append_rows silently
-    # drop the row anyway.
-    known_keys = frozenset(read_existing_event_keys(output_path))
-
-    print(f"Processing {len(urls)} site(s) from {source} (up to {MAX_WORKERS} at a time)...")
-
-    all_rows = []
+    rows_by_url: dict[str, list[dict]] = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_url = {
-            executor.submit(process_site, client, url, known_keys): url for url in urls
+            executor.submit(process_site, client, url, known_keys): url for url in SITE_URLS
         }
         for future in as_completed(future_to_url):
             url = future_to_url[future]
@@ -544,13 +519,43 @@ def main() -> None:
             for row in rows:
                 suffix = f": {row.get('title')}" if row["status"] == "ok" else ""
                 print(f"    -> {row['status']}{suffix}")
-            all_rows.extend(rows)
+            rows_by_url[url] = rows
 
-    append_rows(output_path, all_rows)
-    print(f"\nAppended {len(all_rows)} row(s) to {output_path}")
+    # Flatten in SITE_URLS order so the master write and the email body are
+    # both deterministic regardless of which site finished first.
+    all_rows = [row for url in SITE_URLS for row in rows_by_url[url]]
+    site_statuses = [(url, _site_status_line(rows_by_url[url])) for url in SITE_URLS]
+
+    digest_rows = [row for row in all_rows if row.get("status") == "ok"]
+    if digest_rows:
+        os.makedirs(DIGEST_DIR, exist_ok=True)
+        digest_path = os.path.join(
+            DIGEST_DIR, f"new_events_{datetime.date.today():%Y-%m-%d}.xlsx"
+        )
+        write_weekly_digest(digest_path, all_rows)
+        print(f"\nWrote {len(digest_rows)} new event(s) to {digest_path}")
+    else:
+        digest_path = None
+        print("\nNo new events this week.")
+
+    # Update the master BEFORE emailing so a send failure can never corrupt
+    # dedupe state - the dated digest file on disk is the resend artifact.
+    append_rows(MASTER_PATH, all_rows)
+
+    try:
+        send_weekly_digest(site_statuses, digest_path, dry_run=no_email)
+    except Exception as error:  # pylint: disable=broad-except
+        # Only reachable on a real send (dry_run prints and can't fail here).
+        print(
+            f"ERROR: sending the weekly digest email failed: {error}\n"
+            f"The digest is saved at {digest_path or 'n/a - no new events'}. "
+            "Fix the issue (e.g. set GMAIL_APP_PASSWORD) and re-send it manually.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     print(f"Token usage: {token_usage_tracker.summary()}")
-    check_and_record_usage(token_usage_tracker, TOKEN_USAGE_HISTORY_PATH, usage_mode)
+    check_and_record_usage(token_usage_tracker, TOKEN_USAGE_HISTORY_PATH, "normal")
 
 
 if __name__ == "__main__":

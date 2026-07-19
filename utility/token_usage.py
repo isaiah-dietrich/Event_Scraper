@@ -89,19 +89,15 @@ def check_and_record_usage(usage_tracker: TokenUsageTracker, path: str, mode: st
 
     Compares usage_tracker.total_tokens to the most recent past run recorded
     under the same `mode` (see _previous_total_for_mode) and prints an alert
-    if it grew by more than ALERT_THRESHOLD. A run is only ever compared
-    against past runs of the *same* mode - e.g. "--test" only scrapes a
-    handful of scratch URLs (see cli.batch.TEST_URLS) and would otherwise
-    look like a huge, meaningless swing against a full run over the tracker's
-    Websites sheet, or vice versa. The first run of a given mode has nothing
-    to compare against, so it's just recorded without an alert.
+    if it grew by more than ALERT_THRESHOLD. The first run of a given mode
+    has nothing to compare against, so it's just recorded without an alert.
 
     Args:
         usage_tracker: This run's TokenUsageTracker.
         path: Path to the JSON history file (created if missing).
-        mode: A label for which kind of run this is (e.g. "normal",
-            "test_normal") - see cli.batch.main for how it's derived from CLI
-            flags.
+        mode: A label for which kind of run this is. There is only one run
+            shape now - the weekly digest run - so this is always "normal";
+            the parameter is kept so past history entries stay comparable.
     """
     history = _load_history(path)
     previous_total = _previous_total_for_mode(history, mode)

@@ -1,12 +1,11 @@
-"""Convenience entry point: runs the batch pipeline with one command.
+"""Convenience entry point: runs the weekly digest pipeline with one command.
 
 Usage:
-    python run.py              # process every site in Georgia_Event_Tracker.xlsx's
-                                # Websites sheet, appending results to the same file
-    python run.py --test       # process cli/batch.py's TEST_URLS instead
-    python run.py --fresh      # clear existing results before writing (the
-                                # Websites input sheet is preserved)
-    python run.py --test --fresh  # flags combine freely
+    python run.py              # weekly digest run: scrape cli/batch.py's
+                                # SITE_URLS, write a dated digest of the new
+                                # events, and email it to the client
+    python run.py --no-email   # same run, but print the email instead of
+                                # sending it (the digest file is still written)
 """
 
 from cli.batch import main
