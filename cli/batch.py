@@ -24,8 +24,8 @@ from anthropic import Anthropic
 
 from scrape.extract import EXTRACTION_FIELDS
 from scrape.extract import extract_events
-from scrape.fetch import fetch_rendered_html
-from scrape.reduce import reduce_html
+from scrape.fetch import fetch_page_markdown
+from scrape.reduce import collapse_repeated_blocks
 from scrape.score import score_event
 from utility.email_digest import send_weekly_digest
 from utility.io_excel import append_rows
@@ -65,9 +65,12 @@ SITE_URLS = [
     #"https://www.meetup.com/atlbitlab/events/"
 ]
 
-# Each site gets its own browser instance and its own LLM call, run
-# concurrently. Each worker pops a visible Chromium window (headless=False,
-# see ai_event_scraper.fetch), so don't set this too high locally.
+# Each site gets its own fetch (a Firecrawl scrape call, see scrape.fetch)
+# and its own LLM calls, run concurrently. Firecrawl scrape concurrency is
+# capped independently by scrape.fetch.MAX_CONCURRENT_SCRAPES to match the
+# account's plan limit, so this can be raised without risking 429s from
+# Firecrawl - it mainly bounds how many sites' extract/score LLM calls run
+# at once.
 MAX_WORKERS = 4
 
 # Within a single site, events are scored concurrently too (one Haiku call
@@ -75,16 +78,16 @@ MAX_WORKERS = 4
 MAX_SCORING_WORKERS = 8
 
 # A Cloudflare-style "challenge" interstitial (e.g. "Just a moment... Please
-# wait while we verify you are human") is what fetch_rendered_html sometimes
-# returns instead of real content when a site's bot protection blocks even a
-# visible, non-headless browser. reduce_html strips it down to a handful of
-# lines of garbage, so process_site checks for these markers right after
-# reduce and short-circuits before extract_events - otherwise that garbage
-# still gets sent through a full Sonnet extraction call that can't possibly
-# produce events. The length guard exists so a legitimate long page that
-# merely quotes one of these phrases somewhere in its own content is never
-# misclassified: a real challenge page's reduced text is only ever a few
-# short lines, so anything past that length is assumed to be genuine content.
+# wait while we verify you are human") is what fetch_page_markdown can still
+# occasionally return instead of real content on a site with especially
+# strict bot protection, even with Firecrawl's own stealth/proxy handling.
+# process_site checks for these markers right after reduce and short-circuits
+# before extract_events - otherwise that garbage still gets sent through a
+# full Sonnet extraction call that can't possibly produce events. The length
+# guard exists so a legitimate long page that merely quotes one of these
+# phrases somewhere in its own content is never misclassified: a real
+# challenge page's markdown is only ever a few short lines, so anything past
+# that length is assumed to be genuine content.
 _BOT_CHALLENGE_MAX_CHARS = 600
 _BOT_CHALLENGE_MARKERS = (
     "just a moment",
@@ -396,11 +399,11 @@ def process_site(
     base_row = {"scraped_at": _timestamp(), "source_url": url, "title": url}
 
     try:
-        html = fetch_rendered_html(url)
+        markdown = fetch_page_markdown(url)
     except RuntimeError as error:
         return [{**base_row, "status": f"failed: {error}"}]
 
-    page_text = reduce_html(html, base_url=url)
+    page_text = collapse_repeated_blocks(markdown)
     if not page_text:
         return [{**base_row, "status": "failed: empty page text after reduction"}]
 
@@ -486,6 +489,9 @@ def main() -> None:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         print("ERROR: ANTHROPIC_API_KEY environment variable is not set.", file=sys.stderr)
+        sys.exit(1)
+    if not os.environ.get("FIRECRAWL_API_KEY"):
+        print("ERROR: FIRECRAWL_API_KEY environment variable is not set.", file=sys.stderr)
         sys.exit(1)
     client = Anthropic(api_key=api_key)
 

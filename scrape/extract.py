@@ -43,9 +43,10 @@ Rules:
   details.
 - If a field is unknown/missing, use an empty string "" (or false for
   is_in_person).
-- Links in the page text appear as "Label (https://...)" - the URL in
-  parentheses is that link's actual target. Set "signup_link" to the URL that
-  best reaches this event's own page or registration, choosing in this order:
+- Links in the page text appear as Markdown links: "[Label](https://...)" -
+  the URL inside the parentheses is that link's actual target. Set
+  "signup_link" to the URL that best reaches this event's own page or
+  registration, choosing in this order:
   a registration/tickets/RSVP link, else the URL attached to the event's own
   title, else a nearby "Learn More"/"View Event"/"Details" link. A
   parenthesized URL on the event's title IS its signup_link even when no
@@ -90,7 +91,8 @@ def extract_events(client: Anthropic, page_text: str) -> list[dict]:
 
     Args:
         client: An initialized Anthropic client.
-        page_text: Reduced, visible page text (see reduce.reduce_html).
+        page_text: Firecrawl markdown, with repeated blocks collapsed (see
+            reduce.collapse_repeated_blocks).
 
     Returns:
         A list of event dicts, one per field in EXTRACTION_FIELDS.

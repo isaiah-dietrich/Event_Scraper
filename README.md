@@ -11,12 +11,12 @@ email and its attachment.
 
 ```
 pip install -r requirements.txt
-playwright install chromium
 export ANTHROPIC_API_KEY=sk-...
+export FIRECRAWL_API_KEY=fc-...
 ```
 
-`ANTHROPIC_API_KEY` must be set in the environment; the run exits immediately
-with an error if it's missing.
+`ANTHROPIC_API_KEY` and `FIRECRAWL_API_KEY` must both be set in the
+environment; the run exits immediately with an error if either is missing.
 
 ### Email setup
 
@@ -118,8 +118,8 @@ out a URL to disable it without losing it, per the client's request history).
 
 ## Pipeline detail
 
-fetch ([scrape/fetch.py](scrape/fetch.py), Playwright/Chromium, non-headless)
-→ reduce ([scrape/reduce.py](scrape/reduce.py)) → extract
+fetch ([scrape/fetch.py](scrape/fetch.py), Firecrawl) → reduce
+([scrape/reduce.py](scrape/reduce.py)) → extract
 ([scrape/extract.py](scrape/extract.py), Claude Sonnet) → filter
 ([cli/batch.py](cli/batch.py), no AI call — drops past-dated events, dedupes
 against the master, auto-rejects non-Georgia locations) → score
@@ -128,5 +128,5 @@ against the master, auto-rejects non-Georgia locations) → score
 [utility/email_digest.py](utility/email_digest.py)).
 
 See [CLAUDE.md](CLAUDE.md) for the deep per-stage architecture notes
-(fetch's scroll/pagination/iframe handling, reduce's link-inlining rules,
+(fetch's Firecrawl/pagination handling, reduce's block-collapse dedupe,
 dedupe key details, etc.).
