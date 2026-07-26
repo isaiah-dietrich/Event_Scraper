@@ -16,6 +16,7 @@ import datetime
 import os
 import re
 import sys
+import time
 from concurrent.futures import as_completed
 from concurrent.futures import ThreadPoolExecutor
 
@@ -368,6 +369,43 @@ def _build_event_row(base_row: dict, event: dict, url: str) -> dict:
 
 
 def process_site(
+    client: Anthropic, url: str, known_keys: frozenset = frozenset()
+) -> list[dict]:
+    """Runs _process_site_once, retrying once on an unexpected failure.
+
+    Args:
+        client: An initialized Anthropic client.
+        url: The site URL to scrape.
+        known_keys: See _process_site_once.
+
+    Returns:
+        See _process_site_once.
+    """
+    try:
+        return _process_site_once(client, url, known_keys)
+    except Exception:
+        time.sleep(_TRANSIENT_RETRY_WAIT_SECONDS)
+        return _process_site_once(client, url, known_keys)
+
+
+# A per-site pipeline run can fail transiently for reasons that have nothing
+# to do with the site itself - e.g. a runner-side networking blip reaching
+# Anthropic or Firecrawl (seen in production: both sites failing identically
+# with "Connection error." on one scheduled run, then succeeding on the next
+# with no code or credential change at all). fetch and extract already
+# handle their own well-understood failure modes (RuntimeError, ValueError)
+# and return a normal status row for those - anything that still escapes
+# _process_site_once is by definition unexpected, most notably an
+# uncaught exception from score_event's Anthropic call, which currently has
+# no handling of its own. One retry after a short pause clears most
+# transient cases without masking a genuinely persistent failure; if the
+# retry fails too, its exception propagates to main()'s own handling around
+# future.result(), producing the same "failed: unexpected error: ..." row
+# as before this retry existed.
+_TRANSIENT_RETRY_WAIT_SECONDS = 10
+
+
+def _process_site_once(
     client: Anthropic, url: str, known_keys: frozenset = frozenset()
 ) -> list[dict]:
     """Runs fetch, reduce, and extract for one site.
