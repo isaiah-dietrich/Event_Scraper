@@ -57,13 +57,13 @@ TOKEN_USAGE_HISTORY_PATH = "token_usage_history.json"
 SITE_URLS = [
     "https://ai.gatech.edu/events",
     "https://members.tagonline.org/calendar",
-    #"https://www.georgiamanufacturingalliance.com/events/",
-    #"https://www.aimanufacturingconference.com/",
-    #"https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
-    #"https://luma.com/genai-collective",
-    #"https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1",
-    #"https://atlanta.aitinkerers.org/",
-    #"https://www.meetup.com/atlbitlab/events/"
+    "https://www.georgiamanufacturingalliance.com/events/",
+    "https://www.aimanufacturingconference.com/",
+    "https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
+    "https://luma.com/genai-collective",
+    "https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1",
+    "https://atlanta.aitinkerers.org/",
+    "https://www.meetup.com/atlbitlab/events/"
 ]
 
 # Each site gets its own fetch (a Firecrawl scrape call, see scrape.fetch)
