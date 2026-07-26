@@ -1,0 +1,10 @@
+[
+  {
+    "timestamp": "2026-07-25T21:14:28",
+    "mode": "normal",
+    "call_count": 33,
+    "input_tokens": 32354,
+    "output_tokens": 6792,
+    "total_tokens": 39146
+  }
+]
