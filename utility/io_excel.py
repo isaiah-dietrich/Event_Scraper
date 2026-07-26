@@ -357,6 +357,7 @@ def write_weekly_digest(path: str, rows: list[dict]) -> None:
         ("New Events", new_rows),
         (REJECTED_SHEET_NAME, rejected_rows),
     ):
+        sheet_rows = sorted(sheet_rows, key=lambda row: row.get("fit_score", 0), reverse=True)
         sheet = workbook.create_sheet(title)
         sheet.append(OUTPUT_HEADERS)
         for row in sheet_rows:
