@@ -1,0 +1,81 @@
+name: Weekly digest
+
+on:
+  schedule:
+    # Monday 9am CST (UTC-6). GitHub Actions cron is fixed-UTC and does not
+    # shift for daylight saving - during CDT (roughly Mar-Nov) this fires at
+    # 8am local time instead of 9am.
+    - cron: "0 15 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  weekly-digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Checkout state branch
+        uses: actions/checkout@v4
+        with:
+          ref: state
+          path: state-branch
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # events_master.xlsx and token_usage_history.json are gitignored on
+      # main - they're the pipeline's dedupe store and usage log, persisted
+      # instead on the separate "state" branch (see cli/batch.py MASTER_PATH
+      # and TOKEN_USAGE_HISTORY_PATH, both plain relative paths). Restoring
+      # them into place before the run is what lets a fresh checkout dedupe
+      # correctly against every event a previous run has already reported.
+      - name: Restore state
+        run: |
+          cp state-branch/events_master.xlsx . 2>/dev/null || true
+          cp state-branch/token_usage_history.json . 2>/dev/null || true
+
+      - name: Run weekly digest
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          DIGEST_RECIPIENT_EMAIL: ${{ secrets.DIGEST_RECIPIENT_EMAIL }}
+          DIGEST_RECIPIENT_NAME: ${{ secrets.DIGEST_RECIPIENT_NAME }}
+        run: python run.py
+
+      # Uploaded regardless of the run's outcome so a failed email send
+      # still leaves the digest recoverable for a manual resend, mirroring
+      # the local "resend from the file saved on disk" recovery path (see
+      # README.md's Failure handling section).
+      - name: Upload digest artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-digest
+          path: weekly_digests/*.xlsx
+          if-no-files-found: ignore
+
+      # Runs even if the email send failed above: cli/batch.py's main()
+      # already updates the master workbook BEFORE attempting to send, so a
+      # failed send should never leave this run's newly-seen events
+      # unrecorded - otherwise the next run would treat them as new again.
+      - name: Persist state back to the state branch
+        if: always()
+        run: |
+          cp events_master.xlsx token_usage_history.json state-branch/
+          cd state-branch
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add events_master.xlsx token_usage_history.json
+          git diff --cached --quiet || git commit -m "Update state - $(date -u +%Y-%m-%d)"
+          git push origin state

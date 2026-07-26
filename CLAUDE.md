@@ -4,7 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A manual, once-a-week job: scrapes a fixed list of websites (`SITE_URLS` in `cli/batch.py`) for AI/ML-related events, uses Claude to extract and score them against a fit rubric (in-person, Georgia-based, AI-focused), dedupes against an internal history workbook so only events not seen in a prior run count as new, and emails the client a digest spreadsheet of just that week's new events. There is no shared client-facing workbook anymore — the client's only artifact is the weekly email and its attachment.
+A weekly job, run automatically by a scheduled GitHub Action
+(`.github/workflows/weekly-digest.yml`, Mondays 9am CST): scrapes a fixed
+list of websites (`SITE_URLS` in `cli/batch.py`) for AI/ML-related events,
+uses Claude to extract and score them against a fit rubric (in-person,
+Georgia-based, AI-focused), dedupes against an internal history workbook so
+only events not seen in a prior run count as new, and emails the client a
+digest spreadsheet of just that week's new events. There is no shared
+client-facing workbook — the client's only artifact is the weekly email and
+its attachment. `python run.py` still works as a manual/local run (e.g. for
+an ad-hoc client request) — see README.md's "Automated weekly run" section
+for how it stays in sync with the Action's dedupe state, held on a separate
+`state` branch rather than committed to `main`.
 
 ## Commands
 
