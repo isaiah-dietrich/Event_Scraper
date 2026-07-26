@@ -39,6 +39,10 @@ sending Google account first; generate one at
 [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
 None of these four are required to run with `--no-email`.
 
+Optionally, `DIGEST_CC_EMAIL` adds one or more comma-separated addresses to
+the email's Cc line (e.g. `export DIGEST_CC_EMAIL="you@example.com, someone@example.com"`).
+Unset or blank means no Cc, same as before this existed.
+
 ## Running
 
 ```
@@ -105,7 +109,8 @@ failed send is still recoverable the same way a local run's saved file is
 2. Settings → Secrets and variables → Actions → add repository secrets for
    `ANTHROPIC_API_KEY`, `FIRECRAWL_API_KEY`, `GMAIL_ADDRESS`,
    `GMAIL_APP_PASSWORD`, `DIGEST_RECIPIENT_EMAIL`, `DIGEST_RECIPIENT_NAME`
-   (same values as the local env vars above).
+   (same values as the local env vars above), and optionally
+   `DIGEST_CC_EMAIL`.
 
 **Running `python run.py` locally too:** still works, but the Action is now
 the source of truth for `events_master.xlsx`. Pull the latest state before a

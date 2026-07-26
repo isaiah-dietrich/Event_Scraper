@@ -35,6 +35,13 @@ _ENV_GMAIL_APP_PASSWORD = "GMAIL_APP_PASSWORD"
 _ENV_RECIPIENT_EMAIL = "DIGEST_RECIPIENT_EMAIL"
 _ENV_RECIPIENT_NAME = "DIGEST_RECIPIENT_NAME"
 
+# Optional: one or more comma-separated addresses to Cc on the digest email
+# (e.g. "isaiah@example.com, someone-else@example.com"). Unlike the four
+# required env vars above, a blank/unset value is a valid steady-state - it
+# just means no Cc header is added - so this is deliberately not part of
+# _missing_env_vars.
+_ENV_CC_EMAIL = "DIGEST_CC_EMAIL"
+
 # Placeholders shown in dry-run output when the real env var isn't set, so a
 # dry run is still readable without any configuration in place.
 _PLACEHOLDERS = {
@@ -99,12 +106,21 @@ def _build_message(
     sender_address: str,
     recipient_email: str,
     recipient_name: str,
+    cc_email: str = "",
 ) -> EmailMessage:
     """Composes the weekly digest EmailMessage (subject, body, attachment).
 
     Pure/offline: does not touch the network or read environment variables -
     all recipient/sender details are passed in explicitly so this can be
     exercised directly in tests.
+
+    Args:
+        cc_email: One or more comma-separated addresses for the "Cc" header,
+            or "" to omit it entirely (the common case - most weeks have no
+            Cc). smtplib.send_message reads recipients from the message's
+            To/Cc headers automatically, so setting this is sufficient to
+            actually deliver to the Cc'd address(es) too, not just display
+            them.
     """
     today = datetime.date.today()
     subject_date = f"{today.strftime('%B')} {today.day}, {today.year}"
@@ -128,6 +144,8 @@ def _build_message(
     message["Subject"] = f"Georgia AI Events – New Events for {subject_date}"
     message["From"] = sender_address
     message["To"] = recipient_email
+    if cc_email:
+        message["Cc"] = cc_email
     message.set_content(body)
 
     # Also attach an HTML alternative. In a plain-text-only email the recipient's
@@ -160,6 +178,8 @@ def _print_dry_run(message: EmailMessage, digest_path: str | None) -> None:
     print(f"Subject: {message['Subject']}")
     print(f"From: {message['From']}")
     print(f"To: {message['To']}")
+    if message["Cc"]:
+        print(f"Cc: {message['Cc']}")
     attachment_name = Path(digest_path).name if digest_path is not None else "(no attachment)"
     print(f"Attachment: {attachment_name}")
     print("")
@@ -205,6 +225,7 @@ def send_weekly_digest(
             sender_address=sender_address,
             recipient_email=recipient_email,
             recipient_name=recipient_name,
+            cc_email=os.environ.get(_ENV_CC_EMAIL, ""),
         )
         _print_dry_run(message, digest_path)
         return
@@ -230,6 +251,7 @@ def send_weekly_digest(
         sender_address=gmail_address,
         recipient_email=recipient_email,
         recipient_name=recipient_name,
+        cc_email=os.environ.get(_ENV_CC_EMAIL, ""),
     )
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:

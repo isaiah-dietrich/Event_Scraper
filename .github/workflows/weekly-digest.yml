@@ -51,6 +51,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           DIGEST_RECIPIENT_EMAIL: ${{ secrets.DIGEST_RECIPIENT_EMAIL }}
           DIGEST_RECIPIENT_NAME: ${{ secrets.DIGEST_RECIPIENT_NAME }}
+          DIGEST_CC_EMAIL: ${{ secrets.DIGEST_CC_EMAIL }}
         run: python run.py
 
       # Uploaded regardless of the run's outcome so a failed email send
