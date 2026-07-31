@@ -14,30 +14,27 @@ MODEL = "claude-haiku-4-5-20251001"
 # Edit this to tune what counts as a "good fit" event. Used verbatim in the
 # scoring prompt, so keep it as plain instructions for the model.
 SCORING_CRITERIA = """
-- If the event has zero mention of AI, machine learning, or automation, it is
-  an automatic 1 regardless of any other criteria. Judge this from the
-  event's own title/description, NOT from the org or calendar it was
-  scraped from - a generic membership orientation, networking mixer, or
-  "intro to X" session hosted by an AI-focused organization is still a 1 if
-  the event itself has no AI content. However, if a mixer/social/networking
-  event includes a genuine AI-focused component (an AI-specific session,
-  panel, speaker, or stated theme), score it on that component instead - the
-  "still a 1" rule above only applies when the event truly has no AI
-  content, not merely because it's framed as a mixer or social.
-- In-person events in Georgia score highest, and events located elsewhere in
-  Georgia (Columbus, Augusta, Savannah, Macon, Athens, etc.) should be
-  favored over an otherwise-comparable Atlanta event - the scraped sites
-  skew heavily toward Atlanta, and the digest should read as statewide,
-  not Atlanta-only.
-- Virtual-only events score 2 or below UNLESS they are clearly Georgia-focused
-  or hosted by a Georgia institution (e.g. Georgia Tech, TAG, an Atlanta-based
-  org). A national corporate webinar from Google, Microsoft, or similar scores
-  1. A Georgia Tech or TAG virtual event scores 3-4.
+- If the event has zero mention of AI, machine learning, or automation, it
+  is an automatic 1 regardless of any other criteria, regardless of the
+  hosting org or calendar it was scraped from. Judge this from the event's
+  own title/description, not the organization's general focus. However, if
+  the event has a genuine AI-focused component (a specific session, panel,
+  speaker, or stated theme) even within a broader-themed event, score it on
+  that component instead - the automatic-1 rule only applies when the event
+  truly has no AI content, not merely because its overall framing isn't
+  AI-specific.
+- In-person events in Georgia score highest. Events located outside metro
+  Atlanta should be favored over an otherwise-comparable Atlanta event - the
+  scraped sites skew heavily toward Atlanta, and the digest should read as
+  statewide, not Atlanta-only.
+- Virtual-only events score 2 or below unless they are clearly Georgia-focused
+  or hosted by an organization headquartered or based in Georgia, in which
+  case they can score 3-4. A national corporate webinar with no Georgia tie
+  scores 1.
 - If location is missing/blank, do NOT assume the event is virtual or
   penalize it for ambiguous location - judge it on its AI content and other
-  known details instead. A known in-person AI conference (e.g. AIMST) should
-  score well even if a particular scraped listing for it lacks a location
-  field.
+  known details instead. A known in-person AI conference should still score
+  well even if a particular scraped listing for it lacks a location field.
 - Educational AI events are good (technical talks, conferences, industry
   discussions on AI).
 - Pure paid AI training or events that are heavy-handed sales pitches for the
