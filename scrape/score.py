@@ -19,8 +19,16 @@ SCORING_CRITERIA = """
   event's own title/description, NOT from the org or calendar it was
   scraped from - a generic membership orientation, networking mixer, or
   "intro to X" session hosted by an AI-focused organization is still a 1 if
-  the event itself has no AI content.
-- In-person events in Georgia score highest.
+  the event itself has no AI content. However, if a mixer/social/networking
+  event includes a genuine AI-focused component (an AI-specific session,
+  panel, speaker, or stated theme), score it on that component instead - the
+  "still a 1" rule above only applies when the event truly has no AI
+  content, not merely because it's framed as a mixer or social.
+- In-person events in Georgia score highest, and events located elsewhere in
+  Georgia (Columbus, Augusta, Savannah, Macon, Athens, etc.) should be
+  favored over an otherwise-comparable Atlanta event - the scraped sites
+  skew heavily toward Atlanta, and the digest should read as statewide
+  ("Georgia AI Alliance"), not Atlanta-only.
 - Virtual-only events score 2 or below UNLESS they are clearly Georgia-focused
   or hosted by a Georgia institution (e.g. Georgia Tech, TAG, an Atlanta-based
   org). A national corporate webinar from Google, Microsoft, or similar scores
