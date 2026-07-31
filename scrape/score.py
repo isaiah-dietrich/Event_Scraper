@@ -27,8 +27,8 @@ SCORING_CRITERIA = """
 - In-person events in Georgia score highest, and events located elsewhere in
   Georgia (Columbus, Augusta, Savannah, Macon, Athens, etc.) should be
   favored over an otherwise-comparable Atlanta event - the scraped sites
-  skew heavily toward Atlanta, and the digest should read as statewide
-  ("Georgia AI Alliance"), not Atlanta-only.
+  skew heavily toward Atlanta, and the digest should read as statewide,
+  not Atlanta-only.
 - Virtual-only events score 2 or below UNLESS they are clearly Georgia-focused
   or hosted by a Georgia institution (e.g. Georgia Tech, TAG, an Atlanta-based
   org). A national corporate webinar from Google, Microsoft, or similar scores

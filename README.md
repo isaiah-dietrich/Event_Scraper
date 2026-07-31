@@ -1,14 +1,14 @@
 # AI Event Scraper
 
 Scrapes a list of websites for AI/ML-related events, uses Claude to extract
-and score them against a fit rubric (in-person, Georgia-based, AI-focused),
-and emails the client a spreadsheet of just that week's new events. It runs
-automatically every Monday via a scheduled GitHub Action
+and score them against a configurable fit rubric (in-person, Georgia-based,
+AI-focused, by default), and emails a spreadsheet of just that week's new
+events to a configured recipient. It runs automatically every Monday via a
+scheduled GitHub Action
 ([.github/workflows/weekly-digest.yml](.github/workflows/weekly-digest.yml))
-— there's no shared client-facing workbook; the client's only artifact is
-the weekly email and its attachment. `python run.py` still works as a manual
-local run too (see "Automated weekly run" below for how the two stay in
-sync).
+— there's no shared workbook; the only output is the weekly email and its
+attachment. `python run.py` still works as a manual local run too (see
+"Automated weekly run" below for how the two stay in sync).
 
 ## Setup
 
@@ -29,8 +29,8 @@ variables:
 ```
 export GMAIL_ADDRESS=you@gmail.com
 export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
-export DIGEST_RECIPIENT_EMAIL=client@example.com
-export DIGEST_RECIPIENT_NAME="Client Name"
+export DIGEST_RECIPIENT_EMAIL=recipient@example.com
+export DIGEST_RECIPIENT_NAME="Recipient Name"
 ```
 
 `GMAIL_APP_PASSWORD` is a Gmail **app password** — not your normal Google
@@ -46,7 +46,7 @@ Unset or blank means no Cc, same as before this existed.
 ## Running
 
 ```
-python run.py             # weekly run: scrape, dedupe, write the digest, email it to the client
+python run.py             # weekly run: scrape, dedupe, write the digest, email it to the recipient
 python run.py --no-email  # same run, but prints the composed email to stdout instead of sending it
 ```
 
@@ -64,15 +64,15 @@ python run.py --no-email  # same run, but prints the composed email to stdout in
    failed/no-event site results — into `events_master.xlsx`, *before*
    attempting to send the email, so a failed send can never corrupt what's
    considered "already seen."
-5. Emails the digest to the client via Gmail.
+5. Emails the digest to the configured recipient via Gmail.
 
 ### What appears on disk
 
 - **`events_master.xlsx`** — internal, append-only "seen events" store plus
-  history. Gitignored on `main`. Never sent to or edited by the client or
-  anyone else — it exists purely so the pipeline can tell what's already
-  been reported. Persisted across scheduled runs on the separate `state`
-  branch (see "Automated weekly run" below) rather than committed to `main`.
+  history. Gitignored on `main`. Never sent to or edited by anyone — it
+  exists purely so the pipeline can tell what's already been reported.
+  Persisted across scheduled runs on the separate `state` branch (see
+  "Automated weekly run" below) rather than committed to `main`.
 - **`weekly_digests/new_events_<date>.xlsx`** — one dated file per run,
   gitignored, only written when there's at least one new event that week.
   This is also the resend artifact if the email fails to send (see
@@ -126,19 +126,19 @@ python run.py
 # worktree checked out to `state`, before the next scheduled Action run
 ```
 
-### What the client receives
+### What the recipient receives
 
-An email with subject "Georgia AI Events – New Events for `<date>`" and a
-body containing:
+An email with a subject line naming the digest and the date, and a body
+containing:
 
 - A greeting.
 - "Attached is a spreadsheet of all the new events found this week." — or,
   on a week with no new events, "No new events were found this week." with
-  no attachment. The email is still sent either way, so the client can tell
-  "nothing new this week" apart from "the run never happened."
+  no attachment. The email is still sent either way, so the recipient can
+  tell "nothing new this week" apart from "the run never happened."
 - A "Websites scraped:" list, one line per site: `N new event(s)`,
   `no new events`, or `FAILED: <reason>`.
-- A closing line inviting the client to reply with any sites they'd like
+- A closing line inviting the recipient to reply with any sites they'd like
   added or removed for next week.
 
 When there are new events, the attached workbook has "New Events" and
@@ -153,9 +153,8 @@ locate it from that base calendar page themselves.
 
 The list of sites scraped every week is `SITE_URLS`, hardcoded at the top of
 [cli/batch.py](cli/batch.py) — it's the only site list; there's no input
-spreadsheet or config file. When the client replies to the weekly email
-asking for a site to be added or removed, edit this list directly (comment
-out a URL to disable it without losing it, per the client's request history).
+spreadsheet or config file. To add or remove a site, edit this list directly
+(comment out a URL to disable it without losing it).
 
 ## Failure handling
 
