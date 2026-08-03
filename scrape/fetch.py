@@ -1,7 +1,9 @@
 """Fetch stage: retrieve a page's fully-rendered content as markdown via Firecrawl."""
 
+import collections
 import os
 import threading
+import time
 import urllib.parse
 
 from firecrawl import Firecrawl
@@ -42,6 +44,46 @@ def _get_client() -> Firecrawl:
 # within the plan's limit, independent of MAX_WORKERS.
 MAX_CONCURRENT_SCRAPES = 2
 _scrape_semaphore = threading.Semaphore(MAX_CONCURRENT_SCRAPES)
+
+# The plan's rate limit is per-minute, not just per-concurrent-job - a live
+# run hit "Rate Limit Exceeded ... Consumed (req/min): 11-12, Remaining: 0"
+# even with only MAX_CONCURRENT_SCRAPES=2 calls ever in flight at once,
+# because each scrape finishes in a few seconds and the semaphore lets the
+# next one start right away. A site with numbered-page pagination (see
+# _MAX_ADDITIONAL_PAGES below) can alone burst several calls back-to-back.
+# Kept conservatively under the observed ~10-11/min cap to leave headroom for
+# the account's other Firecrawl usage outside this job.
+MAX_SCRAPES_PER_MINUTE = 8
+
+
+class _RateLimiter:
+    """Blocks callers so no more than `max_per_minute` calls start within any
+    rolling 60-second window, across all threads.
+
+    A plain call-count limiter, not a smart backoff: it paces call *starts*
+    evenly rather than reacting to 429s, which is enough to stay under a
+    fixed per-minute cap regardless of how fast individual scrapes complete.
+    """
+
+    def __init__(self, max_per_minute: int):
+        self._max_per_minute = max_per_minute
+        self._lock = threading.Lock()
+        self._call_times: collections.deque[float] = collections.deque()
+
+    def wait_for_slot(self) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                while self._call_times and now - self._call_times[0] >= 60:
+                    self._call_times.popleft()
+                if len(self._call_times) < self._max_per_minute:
+                    self._call_times.append(now)
+                    return
+                sleep_time = 60 - (now - self._call_times[0])
+            time.sleep(sleep_time)
+
+
+_rate_limiter = _RateLimiter(MAX_SCRAPES_PER_MINUTE)
 
 # Numbered-page pagination (e.g. Eventbrite's "?page=1"): follow up to this
 # many pages beyond the one given, in addition to whatever Firecrawl's single
@@ -117,12 +159,16 @@ def _scrape_one_page(url: str) -> str:
     """Scrapes a single URL via Firecrawl and returns its markdown content.
 
     The semaphore bounds how many scrape calls are in flight at once across
-    all concurrently-processing sites (see MAX_CONCURRENT_SCRAPES). The SDK
-    itself already retries transient failures (network errors, 5xx) before
-    raising, so no retry loop is needed here the way the old Playwright fetch
-    needed one.
+    all concurrently-processing sites (see MAX_CONCURRENT_SCRAPES); the rate
+    limiter separately bounds how many calls can *start* per minute (see
+    MAX_SCRAPES_PER_MINUTE) - concurrency alone doesn't prevent bursting past
+    a per-minute cap when individual calls complete quickly. The SDK itself
+    already retries transient failures (network errors, 5xx) before raising,
+    so no retry loop is needed here the way the old Playwright fetch needed
+    one.
     """
     client = _get_client()
+    _rate_limiter.wait_for_slot()
     with _scrape_semaphore:
         try:
             document = client.scrape(url, formats=["markdown"], only_main_content=_ONLY_MAIN_CONTENT)
