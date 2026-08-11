@@ -84,10 +84,24 @@ python run.py --no-email  # same run, but prints the composed email to stdout in
 ## Automated weekly run
 
 A GitHub Action ([.github/workflows/weekly-digest.yml](.github/workflows/weekly-digest.yml))
-runs the pipeline automatically every Monday at 9am CST (`cron: "0 15 * * 1"`
-— GitHub Actions cron is fixed-UTC and doesn't shift for daylight saving, so
-this fires at 8am local during CDT), and can also be triggered on demand
-from the Actions tab (`workflow_dispatch`).
+runs the pipeline automatically every Monday at 9am Central, and can also be
+triggered on demand from the Actions tab (`workflow_dispatch`).
+
+Holding that 9am year round takes two cron entries, because GitHub Actions
+cron is fixed-UTC and never shifts for daylight saving: `0 15 * * 1` is 9am
+CST (UTC-6) and `0 14 * * 1` is 9am CDT (UTC-5). Both fire every Monday, and
+a tiny `gate` job runs first to stop whichever one isn't 9am Central today —
+it compares `github.event.schedule` against the offset `TZ=America/Chicago`
+reports, so the wrong half of the year is discarded in a few seconds of
+runner time, before any checkout, install, or API spend. A run skipped this
+way shows up as a green "skipped" `weekly-digest` job, not a failure.
+
+Note that the *fire* time is not the *arrival* time. GitHub does not
+guarantee punctuality for scheduled workflows — a run regularly sits queued
+for anywhere from a few minutes to over an hour, worst at the top of the
+hour — and the pipeline itself then takes several minutes to scrape, extract,
+and score before the email goes out. Expect the digest to land sometime
+after 9am, not at 9am sharp.
 
 Because `events_master.xlsx` and `token_usage_history.json` are gitignored
 local state, and every Action run starts from a fresh checkout, they're

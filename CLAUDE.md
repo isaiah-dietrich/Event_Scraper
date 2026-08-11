@@ -5,7 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A weekly job, run automatically by a scheduled GitHub Action
-(`.github/workflows/weekly-digest.yml`, Mondays 9am CST): scrapes a fixed
+(`.github/workflows/weekly-digest.yml`, Mondays 9am Central — two fixed-UTC
+cron entries plus a `gate` job that kills the one that isn't 9am local this
+half of the year): scrapes a fixed
 list of websites (`SITE_URLS` in `cli/batch.py`) for AI/ML-related events,
 uses Claude to extract and score them against a fit rubric (in-person,
 Georgia-based, AI-focused), dedupes against an internal history workbook so

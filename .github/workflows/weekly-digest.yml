@@ -2,17 +2,60 @@ name: Weekly digest
 
 on:
   schedule:
-    # Monday 9am CST (UTC-6). GitHub Actions cron is fixed-UTC and does not
-    # shift for daylight saving - during CDT (roughly Mar-Nov) this fires at
-    # 8am local time instead of 9am.
+    # 9am Central every Monday, year round. GitHub Actions cron is fixed-UTC
+    # and never shifts for daylight saving, so 9am local needs two entries:
+    # 15:00 UTC while Central is on CST (UTC-6, roughly Nov-Mar) and 14:00
+    # UTC while it's on CDT (UTC-5, roughly Mar-Nov). Both fire every Monday;
+    # the "gate" job below stops whichever one is wrong for the current half
+    # of the year before the pipeline (and its API spend) ever starts.
     - cron: "0 15 * * 1"
+    - cron: "0 14 * * 1"
   workflow_dispatch: {}
 
 permissions:
   contents: write
 
 jobs:
+  # Decides which of the two schedules above is the 9am-Central one today.
+  # Cheap enough to be worth burning a runner on: it does no checkout, no
+  # installs, and no API calls, so the discarded half of the schedules costs
+  # only a few seconds of runner time.
+  gate:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          # Empty for workflow_dispatch; the triggering cron string otherwise.
+          FIRED_BY: ${{ github.event.schedule }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" != "schedule" ]; then
+            echo "Manual trigger - running."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # -0500 means Central is on CDT right now, -0600 means CST. This is
+          # evaluated on the Monday the cron fires and DST always flips on a
+          # Sunday, so it can't change out from under the run.
+          if [ "$(TZ=America/Chicago date +%z)" = "-0500" ]; then
+            want="0 14 * * 1"
+          else
+            want="0 15 * * 1"
+          fi
+          if [ "$FIRED_BY" = "$want" ]; then
+            echo "Fired by '$FIRED_BY', which is 9am Central today - running."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Fired by '$FIRED_BY', but 9am Central today is '$want' - skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   weekly-digest:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main
