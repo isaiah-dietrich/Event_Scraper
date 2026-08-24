@@ -109,14 +109,24 @@ jobs:
           path: weekly_digests/*.xlsx
           if-no-files-found: ignore
 
-      # Runs even if the email send failed above: cli/batch.py's main()
-      # already updates the master workbook BEFORE attempting to send, so a
-      # failed send should never leave this run's newly-seen events
-      # unrecorded - otherwise the next run would treat them as new again.
+      # Runs even if the run above failed. On a HEALTHY run, cli/batch.py's
+      # main() updates the master workbook BEFORE attempting to send, so a
+      # failed send never leaves that run's newly-seen events unrecorded -
+      # otherwise the next run would treat them as new again. On a GATED run
+      # (see utility/run_health.py) main() deliberately does NOT write the
+      # master, because those events were reported to nobody; this step then
+      # copies back a byte-identical file and the `git diff --cached --quiet`
+      # below turns the commit into a no-op, which is the intended outcome.
+      #
+      # Each file is copied separately and tolerantly, mirroring the Restore
+      # step: a run that is gated before ever writing the master (a first-ever
+      # run, or one following a rollback) legitimately has no file to copy,
+      # and a hard `cp` of both at once would fail the step over it.
       - name: Persist state back to the state branch
         if: always()
         run: |
-          cp events_master.xlsx token_usage_history.json state-branch/
+          cp events_master.xlsx state-branch/ 2>/dev/null || true
+          cp token_usage_history.json state-branch/ 2>/dev/null || true
           cd state-branch
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

@@ -7,6 +7,12 @@ not seen in a prior run survive, writes a standalone weekly digest .xlsx of
 just those new events (DIGEST_DIR), records the new events into the master,
 and emails the digest to the client with a per-site status line for each URL.
 
+Every run is classified healthy or unhealthy before any of that is emailed
+(see utility.run_health): a run with a failed site, a pipeline exception, or
+failure text in its composed email body never reaches the client at all - the
+owner gets a diagnostic alert instead, and the master is left untouched so
+events that were never reported don't get recorded as already-seen.
+
 This is a manual, once-a-week run. The master workbook is internal state (a
 seen-events store) and is never sent to or edited by the client; the client
 only ever receives the dated weekly digest file.
@@ -17,6 +23,7 @@ import os
 import re
 import sys
 import time
+import traceback
 from concurrent.futures import as_completed
 from concurrent.futures import ThreadPoolExecutor
 
@@ -31,11 +38,17 @@ from scrape.fetch import MAX_SCRAPES_PER_RUN
 from scrape.fetch import scrapes_used
 from scrape.reduce import collapse_repeated_blocks
 from scrape.score import score_event
+from utility.email_digest import OWNER_ALERT_EMAIL
+from utility.email_digest import render_client_body
+from utility.email_digest import send_health_alert
 from utility.email_digest import send_weekly_digest
 from utility.io_excel import append_rows
 from utility.io_excel import event_key
 from utility.io_excel import read_existing_event_keys
 from utility.io_excel import write_weekly_digest
+from utility.run_health import classify_run
+from utility.run_health import report_for_crash
+from utility.run_health import RunHealthReport
 from utility.token_usage import check_and_record_usage
 from utility.token_usage import tracker as token_usage_tracker
 
@@ -520,25 +533,39 @@ def _site_status_line(rows: list[dict]) -> str:
     return "no new events"
 
 
-def main() -> None:
-    """Runs the weekly digest pipeline over every URL in SITE_URLS.
+def _digest_path_for_today() -> str:
+    """Returns the path this run's digest workbook is written to.
 
-    Scrapes each site, dedupes against the internal master workbook, writes a
-    dated digest of only the new events, records them into the master, then
-    emails the digest to the client. `--no-email` prints the email instead of
-    sending it.
+    A pure function of today's date rather than a value threaded through the
+    call chain, so main() can still find (and attach to the owner alert) a
+    digest that was written moments before an unexpected exception took the
+    run down before it could return that path.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("ERROR: ANTHROPIC_API_KEY environment variable is not set.", file=sys.stderr)
-        sys.exit(1)
-    if not os.environ.get("FIRECRAWL_API_KEY"):
-        print("ERROR: FIRECRAWL_API_KEY environment variable is not set.", file=sys.stderr)
-        sys.exit(1)
-    client = Anthropic(api_key=api_key)
+    return os.path.join(
+        DIGEST_DIR, f"new_events_{datetime.date.today():%Y-%m-%d}.xlsx"
+    )
 
-    no_email = "--no-email" in sys.argv
 
+def _run_pipeline(
+    client: Anthropic,
+) -> tuple[list[dict], list[tuple[str, str]], str | None]:
+    """Scrapes every site, enriches the rows, and writes this run's digest.
+
+    Everything from loading dedupe state through writing the digest workbook
+    lives here, and it deliberately stops *before* the master-workbook update
+    and the email - those two steps' behaviour depends on whether the run
+    turned out healthy, so they belong to main(). Having all the rest in one
+    function is what lets main() wrap the whole pipeline in a single
+    try/except and turn any unexpected exception into an owner alert, instead
+    of a stack trace nobody sees until they think to open the Action log.
+
+    Returns:
+        (all_rows, site_statuses, digest_path), where all_rows is every
+        output row across all sites in SITE_URLS order, site_statuses is the
+        ordered (url, status_line) pairs for the email body, and digest_path
+        is the digest workbook this run wrote - or None when there were no
+        new events to write one for.
+    """
     # Pre-scoring dedupe: load which events are already in the master workbook
     # (an empty set if the file doesn't exist yet - a first run is naturally
     # all-new) so process_site can skip a Haiku scoring call for any event
@@ -589,18 +616,157 @@ def main() -> None:
     digest_rows = [row for row in all_rows if row.get("status") == "ok"]
     if digest_rows:
         os.makedirs(DIGEST_DIR, exist_ok=True)
-        digest_path = os.path.join(
-            DIGEST_DIR, f"new_events_{datetime.date.today():%Y-%m-%d}.xlsx"
-        )
+        digest_path = _digest_path_for_today()
         write_weekly_digest(digest_path, all_rows)
         print(f"\nWrote {len(digest_rows)} new event(s) to {digest_path}")
     else:
         digest_path = None
         print("\nNo new events this week.")
 
-    # Update the master BEFORE emailing so a send failure can never corrupt
-    # dedupe state - the dated digest file on disk is the resend artifact.
-    append_rows(MASTER_PATH, all_rows)
+    return all_rows, site_statuses, digest_path
+
+
+def _report_gated_run(report: RunHealthReport, dry_run: bool) -> None:
+    """Explains a gated run on stderr, then alerts the owner about it.
+
+    The client is sent nothing at all on this path - not the digest, not a
+    copy to DIGEST_CC_EMAIL, not a "something went wrong" note. That is the
+    whole point of the gate: the failure that prompted it (a run that emailed
+    the client raw Firecrawl rate-limit error text inside its "Websites
+    scraped:" list) has to be impossible by construction, not merely
+    unlikely.
+
+    A failure to send the *alert itself* is reported loudly but never
+    re-raised. By that point the gate has already done the job that matters -
+    the client received nothing - and turning "the run had errors" into an
+    unhandled exception on top of that would only bury the explanation.
+    """
+    print("", file=sys.stderr)
+    print(
+        "RUN GATED: this run had errors, so the client digest email was NOT sent.",
+        file=sys.stderr,
+    )
+    for reason in report.gate_reasons:
+        print(f"  - {reason}", file=sys.stderr)
+    print(f"Alerting {OWNER_ALERT_EMAIL} instead.", file=sys.stderr)
+    print(
+        f"{MASTER_PATH} was deliberately left untouched, so the next run will "
+        "rediscover this run's events and report them normally.",
+        file=sys.stderr,
+    )
+
+    try:
+        send_health_alert(report, dry_run=dry_run)
+    except Exception as error:  # pylint: disable=broad-except
+        print(
+            f"ERROR: the run-health alert to {OWNER_ALERT_EMAIL} could not be "
+            f"sent either: {error}\n"
+            "The gate still held - the client received nothing. This run's "
+            "digest, if one was written, is at "
+            f"{report.digest_path or 'n/a - none written'}.",
+            file=sys.stderr,
+        )
+
+
+def _print_run_accounting() -> None:
+    """Prints and records this run's Firecrawl credit and token usage.
+
+    Called on every exit path, gated or not: the credits and tokens were
+    genuinely spent either way, and a gated run whose spend went unrecorded
+    would leave the usage log quietly under-reporting what the month cost.
+    """
+    print(f"Firecrawl scrapes used: {scrapes_used()} (cap {MAX_SCRAPES_PER_RUN}/run)")
+    print(f"Token usage: {token_usage_tracker.summary()}")
+    check_and_record_usage(token_usage_tracker, TOKEN_USAGE_HISTORY_PATH, "normal")
+
+
+def main() -> None:
+    """Runs the weekly digest pipeline over every URL in SITE_URLS.
+
+    Scrapes each site, dedupes against the internal master workbook, writes a
+    dated digest of only the new events, and then - before anything is
+    emailed and before the master is touched - decides whether the run is
+    healthy enough to go to the client (see utility.run_health).
+
+    A healthy run behaves exactly as it always has: the master is updated
+    first (so a send failure can't corrupt dedupe state), then the digest is
+    emailed to the client. An unhealthy run sends the client nothing, leaves
+    the master untouched, emails the owner a diagnostic alert instead, and
+    exits 1. `--no-email` prints whichever of those two emails would have
+    gone out instead of sending it.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("ERROR: ANTHROPIC_API_KEY environment variable is not set.", file=sys.stderr)
+        sys.exit(1)
+    if not os.environ.get("FIRECRAWL_API_KEY"):
+        print("ERROR: FIRECRAWL_API_KEY environment variable is not set.", file=sys.stderr)
+        sys.exit(1)
+    client = Anthropic(api_key=api_key)
+
+    no_email = "--no-email" in sys.argv
+
+    all_rows: list[dict] = []
+    site_statuses: list[tuple[str, str]] = []
+    digest_path: str | None = None
+    try:
+        all_rows, site_statuses, digest_path = _run_pipeline(client)
+    except Exception as error:  # pylint: disable=broad-except
+        # A crash out of the pipeline itself leaves no rows and no status
+        # lines, so the traceback is the entire diagnostic - which is exactly
+        # why the alert carries it verbatim. The digest workbook may still
+        # have been written moments before the crash, so look for it by name
+        # (see _digest_path_for_today) and attach it if it's there.
+        written = _digest_path_for_today()
+        report = report_for_crash(
+            error,
+            traceback.format_exc(),
+            digest_path=written if os.path.exists(written) else None,
+        )
+    else:
+        report = classify_run(
+            all_rows,
+            site_statuses,
+            digest_path=digest_path,
+            # The keyword backstop scans the *real* composed body rather than
+            # a re-derivation of it, so the two can't drift apart - see
+            # utility.run_health.scan_for_failure_text.
+            client_body=render_client_body(site_statuses, digest_path),
+        )
+
+    if report.healthy:
+        # Update the master BEFORE emailing so a send failure can never
+        # corrupt dedupe state - the dated digest file on disk is the resend
+        # artifact. Reached only on a healthy run, and deliberately so: a
+        # gated run reported its events to nobody, so recording them as
+        # already-seen would make every later run skip them and the client
+        # would never hear about them at all.
+        try:
+            append_rows(MASTER_PATH, all_rows)
+        except Exception as error:  # pylint: disable=broad-except
+            # A master write that blows up (e.g. _validate_header rejecting a
+            # stale header) is every bit as client-unsafe as a failed site:
+            # the digest would go out while the events behind it went
+            # unrecorded, and next week would report all of them a second
+            # time. Gate the run and tell the owner instead.
+            report = report_for_crash(
+                error,
+                traceback.format_exc(),
+                rows=all_rows,
+                site_statuses=site_statuses,
+                digest_path=digest_path,
+            )
+
+    if not report.healthy:
+        _report_gated_run(report, dry_run=no_email)
+        _print_run_accounting()
+        # Exit non-zero so the scheduled Action goes red and GitHub's own
+        # workflow-failure notification backs up the alert email. Every
+        # `if: always()` step in the workflow still runs, so the digest is
+        # still uploaded as a build artifact; the state-persist step re-pushes
+        # an events_master.xlsx this run never modified, which that step's own
+        # `git diff --cached --quiet` check turns into a no-op.
+        sys.exit(1)
 
     try:
         send_weekly_digest(site_statuses, digest_path, dry_run=no_email)
@@ -614,9 +780,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    print(f"Firecrawl scrapes used: {scrapes_used()} (cap {MAX_SCRAPES_PER_RUN}/run)")
-    print(f"Token usage: {token_usage_tracker.summary()}")
-    check_and_record_usage(token_usage_tracker, TOKEN_USAGE_HISTORY_PATH, "normal")
+    _print_run_accounting()
 
 
 if __name__ == "__main__":

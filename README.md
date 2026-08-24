@@ -172,23 +172,45 @@ spreadsheet or config file. To add or remove a site, edit this list directly
 
 ## Failure handling
 
-- A single site failing (blocked by bot protection, a truncated or malformed
-  extraction response, a network error, etc.) doesn't stop the run — that
-  site just gets a `FAILED: <reason>` line in the email body, and every
-  other site's results still go out normally.
-- If sending the email itself fails (e.g. a missing or wrong
-  `GMAIL_APP_PASSWORD`), `run.py` prints where the digest file was saved on
-  disk and exits with a non-zero status. The master workbook has already
-  been updated by that point, so simply re-running the pipeline would treat
-  that week's events as already-seen and produce an empty digest next time.
-  Instead, fix the credentials and resend the saved `.xlsx` file from
-  `weekly_digests/` manually (locally), or download the `weekly-digest`
-  workflow artifact from the failed Action run (via GitHub Actions).
-- A failed scheduled Action run itself is surfaced by GitHub's own
-  notification to the repo owner on workflow failure — no extra code needed
-  for that. The `state` branch still gets updated in this case (see
-  "Automated weekly run" above), so a re-run afterward won't re-report
-  events the failed run already recorded.
+**The client never receives a run that had errors in it.** Every run is
+classified healthy or unhealthy by
+[utility/run_health.py](utility/run_health.py) *before* anything is emailed
+and before the master workbook is touched. This exists because the
+2026-08-24 run emailed the client raw internal error text ("Rate Limit
+Exceeded: … Consumed (req/min): 11 …") for two of its ten sites.
+
+- **A single site failing now withholds the whole digest.** Bot protection, a
+  truncated extraction response, a network error, a rate limit that outlived
+  its retries — any one of them makes the run unhealthy. The client gets
+  nothing; a diagnostic alert goes to the owner instead
+  (`OWNER_ALERT_EMAIL` in [utility/email_digest.py](utility/email_digest.py),
+  hardcoded on purpose — a secret that was never configured would silently
+  defeat the alert). This is a deliberate change from the old behavior, where
+  a failed site was merely a `FAILED: <reason>` line the client saw.
+- **A gated run does not update the master workbook**, and exits 1 so the
+  Action goes red and GitHub's own failure notification backs up the alert.
+  Its events were reported to nobody, so recording them as already-seen would
+  make every later run skip them and the client would never hear about them.
+  The practical consequence: **just re-run it.** Once the underlying problem
+  is fixed, a fresh run re-finds the same events and sends one complete
+  digest. No dedupe surgery needed.
+- To send a partial week anyway, forward the `.xlsx` attached to the alert
+  email by hand — but note the master still won't have advanced, so the next
+  successful run will report those events again.
+- Detection is deterministic, not an AI call: the primary check reads the
+  `status` field every row already carries (`failed:` → unhealthy), and a
+  keyword scan of the actual composed email body backstops it in case some
+  future code path emits error text without a `failed:` status. The
+  keyword patterns are anchored on machine-generated shape (`FAILED:`,
+  `RuntimeError:`, `Traceback (most recent call last)`) rather than bare
+  words, so real event titles like "Error Handling in Production ML" don't
+  trip it.
+- If sending a *healthy* digest fails (e.g. a wrong `GMAIL_APP_PASSWORD`),
+  `run.py` prints where the digest was saved and exits non-zero. The master
+  has already been updated by that point, so re-running would produce an
+  empty digest. Instead fix the credentials and resend the saved `.xlsx`
+  from `weekly_digests/` manually, or download the `weekly-digest` workflow
+  artifact from the failed Action run.
 
 ## Pipeline detail
 
@@ -197,9 +219,12 @@ fetch ([scrape/fetch.py](scrape/fetch.py), Firecrawl) → reduce
 ([scrape/extract.py](scrape/extract.py), Claude Sonnet) → filter
 ([cli/batch.py](cli/batch.py), no AI call — drops past-dated events, dedupes
 against the master, auto-rejects non-Georgia locations) → score
-([scrape/score.py](scrape/score.py), Claude Haiku) → write + email
-([utility/io_excel.py](utility/io_excel.py),
-[utility/email_digest.py](utility/email_digest.py)).
+([scrape/score.py](scrape/score.py), Claude Haiku) → enrich
+([scrape/enrich.py](scrape/enrich.py)) → write
+([utility/io_excel.py](utility/io_excel.py)) → **health gate**
+([utility/run_health.py](utility/run_health.py)) → email
+([utility/email_digest.py](utility/email_digest.py) — to the client only if
+the gate passed, to the owner otherwise).
 
 See [CLAUDE.md](CLAUDE.md) for the deep per-stage architecture notes
 (fetch's Firecrawl/pagination handling, reduce's block-collapse dedupe,
