@@ -85,6 +85,78 @@ class _RateLimiter:
 
 _rate_limiter = _RateLimiter(MAX_SCRAPES_PER_MINUTE)
 
+
+# Hard ceiling on Firecrawl credits one run may spend, across every site and
+# every stage. One scrape = one credit, so this is a credit budget in all but
+# name. The account's plan allows 1000 credits/month against ~4-5 weekly runs,
+# and the description-enrichment stage (see scrape.enrich) makes per-event
+# scrapes whose count scales with how many events the week turned up - i.e.
+# the one part of the pipeline whose cost isn't bounded by len(SITE_URLS).
+# This is the backstop that keeps an unusually large week from eating the
+# month; scrape.enrich.MAX_ENRICHMENT_SCRAPES is the tighter, everyday limit
+# that normally binds first.
+MAX_SCRAPES_PER_RUN = 200
+
+
+class ScrapeBudgetExceeded(RuntimeError):
+    """Raised when a run has spent its MAX_SCRAPES_PER_RUN Firecrawl credits.
+
+    Subclasses RuntimeError so it flows through the same handling as any
+    other fetch failure: fetch_page_markdown's callers (cli.batch.
+    _process_site_once) already catch RuntimeError and turn it into a
+    "failed: ..." status row instead of aborting the batch.
+    """
+
+
+class _ScrapeBudget:
+    """Thread-safe count of scrapes spent this run, capped at `limit`.
+
+    Shared across every worker thread, since the cap is per-run (per billing
+    period) rather than per-site.
+    """
+
+    def __init__(self, limit: int):
+        self._limit = limit
+        self._used = 0
+        self._lock = threading.Lock()
+
+    def consume(self) -> None:
+        """Claims one scrape's worth of budget, or raises if none is left."""
+        with self._lock:
+            if self._used >= self._limit:
+                raise ScrapeBudgetExceeded(
+                    f"run-wide Firecrawl budget of {self._limit} scrape(s) is "
+                    "exhausted; skipping this scrape"
+                )
+            self._used += 1
+
+    def remaining(self) -> int:
+        with self._lock:
+            return max(0, self._limit - self._used)
+
+    def used(self) -> int:
+        with self._lock:
+            return self._used
+
+
+_budget = _ScrapeBudget(MAX_SCRAPES_PER_RUN)
+
+
+def remaining_scrape_budget() -> int:
+    """Scrapes this run may still make before MAX_SCRAPES_PER_RUN is hit.
+
+    Lets an optional, cost-scaling stage (see scrape.enrich) size its own
+    work to what's actually left rather than starting scrapes that would
+    raise ScrapeBudgetExceeded partway through.
+    """
+    return _budget.remaining()
+
+
+def scrapes_used() -> int:
+    """Scrapes made so far this run - reported at the end of a run so credit
+    consumption is visible instead of silent."""
+    return _budget.used()
+
 # Numbered-page pagination (e.g. Eventbrite's "?page=1"): follow up to this
 # many pages beyond the one given, in addition to whatever Firecrawl's single
 # scrape of each page reveals. Ported as-is from the Playwright-era fetch -
@@ -158,16 +230,24 @@ def _pages_are_near_duplicate(lines_a: set[str], lines_b: set[str]) -> bool:
 def _scrape_one_page(url: str) -> str:
     """Scrapes a single URL via Firecrawl and returns its markdown content.
 
-    The semaphore bounds how many scrape calls are in flight at once across
-    all concurrently-processing sites (see MAX_CONCURRENT_SCRAPES); the rate
-    limiter separately bounds how many calls can *start* per minute (see
-    MAX_SCRAPES_PER_MINUTE) - concurrency alone doesn't prevent bursting past
-    a per-minute cap when individual calls complete quickly. The SDK itself
-    already retries transient failures (network errors, 5xx) before raising,
-    so no retry loop is needed here the way the old Playwright fetch needed
-    one.
+    Three independent limits apply, each covering something the others
+    don't: the budget caps total credits spent per run (see
+    MAX_SCRAPES_PER_RUN), the semaphore bounds how many scrape calls are in
+    flight at once across all concurrently-processing sites (see
+    MAX_CONCURRENT_SCRAPES), and the rate limiter bounds how many calls may
+    *start* per minute (see MAX_SCRAPES_PER_MINUTE) - concurrency alone
+    doesn't prevent bursting past a per-minute cap when individual calls
+    complete quickly. The budget is claimed before the rate limiter so an
+    over-budget call fails immediately instead of sleeping out a rate-limit
+    wait first. The SDK itself already retries transient failures (network
+    errors, 5xx) before raising, so no retry loop is needed here the way the
+    old Playwright fetch needed one.
+
+    Raises:
+        ScrapeBudgetExceeded: If this run has already used its full budget.
     """
     client = _get_client()
+    _budget.consume()
     _rate_limiter.wait_for_slot()
     with _scrape_semaphore:
         try:

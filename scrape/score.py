@@ -27,14 +27,33 @@ SCORING_CRITERIA = """
   Atlanta should be favored over an otherwise-comparable Atlanta event - the
   scraped sites skew heavily toward Atlanta, and the digest should read as
   statewide, not Atlanta-only.
-- Virtual-only events score 2 or below unless they are clearly Georgia-focused
-  or hosted by an organization headquartered or based in Georgia, in which
-  case they can score 3-4. A national corporate webinar with no Georgia tie
-  scores 1.
-- If location is missing/blank, do NOT assume the event is virtual or
-  penalize it for ambiguous location - judge it on its AI content and other
-  known details instead. A known in-person AI conference should still score
-  well even if a particular scraped listing for it lacks a location field.
+- An event counts as virtual-only ONLY when its own details say so in words -
+  "virtual", "online", "webinar", "Zoom", "livestream", "remote", or similar.
+  A blank, missing, or vague location is NOT evidence that an event is
+  virtual.
+- A blank or missing location just means the listing didn't print a venue.
+  Default to treating that event as in-person and local, and judge it on its
+  AI content, its host, and whatever else is known. Do not lower the score
+  for it, and do not cite the absent location as a reason in your
+  explanation. A known in-person AI conference should still score well even
+  if a particular scraped listing for it lacks a location field.
+- Events that are virtual-only by the wording test above score 2 or below
+  unless they are clearly Georgia-focused or hosted by an organization
+  headquartered or based in Georgia, in which case they can score 3-4. A
+  national corporate webinar with no Georgia tie scores 1.
+- Some hosts are Georgia organizations even when the event text never spells
+  out the state. Count these as a Georgia tie:
+  - TAG and the Technology Association of Georgia, including any "TAG
+    <topic> Society" chapter (e.g. TAG Data Science & AI Society, TAG
+    Corporate Development Society, TAG Cybersecurity & Risk Management
+    Society) and anything hosted on tagonline.org.
+  - Georgia Tech, Georgia State, UGA, Emory, and other Georgia universities.
+  - Georgia Manufacturing Alliance.
+  - Atlanta AI Tinkerers and ATL BitLab.
+  - Any host whose name contains "Georgia" or "Atlanta".
+  This bears on the location/Georgia judgment ONLY. A Georgia host is never
+  by itself evidence that the event has AI content - that is still judged
+  from the event's own title and description, per the first rule above.
 - Educational AI events are good (technical talks, conferences, industry
   discussions on AI).
 - Pure paid AI training or events that are heavy-handed sales pitches for the

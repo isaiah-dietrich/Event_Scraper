@@ -23,9 +23,12 @@ from concurrent.futures import ThreadPoolExecutor
 import dateparser
 from anthropic import Anthropic
 
+from scrape.enrich import enrich_descriptions
 from scrape.extract import EXTRACTION_FIELDS
 from scrape.extract import extract_events
 from scrape.fetch import fetch_page_markdown
+from scrape.fetch import MAX_SCRAPES_PER_RUN
+from scrape.fetch import scrapes_used
 from scrape.reduce import collapse_repeated_blocks
 from scrape.score import score_event
 from utility.email_digest import send_weekly_digest
@@ -571,6 +574,18 @@ def main() -> None:
     all_rows = [row for url in SITE_URLS for row in rows_by_url[url]]
     site_statuses = [(url, _site_status_line(rows_by_url[url])) for url in SITE_URLS]
 
+    # Fill in blank descriptions from each event's own page, then re-score
+    # those events now that there's more to judge them on. Runs here, after
+    # every site is done and before anything is written, for two reasons: the
+    # Firecrawl credit budget can be spent on the best events across all
+    # sites rather than first-come-first-served, and a re-score can move an
+    # event between the digest's New/Rejected sheets, so the write below has
+    # to see the final scores. Mutates the row dicts in place - all_rows and
+    # rows_by_url hold the same objects, so site_statuses (already computed,
+    # and counting only "ok" rows, which enrichment never changes) stays
+    # correct either way.
+    enrich_descriptions(client, all_rows)
+
     digest_rows = [row for row in all_rows if row.get("status") == "ok"]
     if digest_rows:
         os.makedirs(DIGEST_DIR, exist_ok=True)
@@ -599,6 +614,7 @@ def main() -> None:
         )
         sys.exit(1)
 
+    print(f"Firecrawl scrapes used: {scrapes_used()} (cap {MAX_SCRAPES_PER_RUN}/run)")
     print(f"Token usage: {token_usage_tracker.summary()}")
     check_and_record_usage(token_usage_tracker, TOKEN_USAGE_HISTORY_PATH, "normal")
 
