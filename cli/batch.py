@@ -56,7 +56,7 @@ TOKEN_USAGE_HISTORY_PATH = "token_usage_history.json"
 # entries are intentionally toggled off by hand - leave them as-is.)
 SITE_URLS = [
     "https://ai.gatech.edu/events",
-    "https://members.tagonline.org/calendar",
+    "https://members.tagonline.org/calendar/Search?term=&DateFilter=0&from=&to=&CategoryValues=&mode=2"
     "https://www.georgiamanufacturingalliance.com/events/",
     "https://www.aimanufacturingconference.com/",
     "https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
