@@ -23,6 +23,20 @@ SCORING_CRITERIA = """
   that component instead - the automatic-1 rule only applies when the event
   truly has no AI content, not merely because its overall framing isn't
   AI-specific.
+- Events restricted to a closed audience the client cannot join - state
+  government employees only, a single company's staff, one school's enrolled
+  students, or members-only with no public registration path - score 1 no
+  matter how strong their AI content is. The digest lists events the
+  client's audience can actually attend. An event that merely costs money,
+  requires registration, or offers a member discount is NOT restricted and
+  is scored normally.
+- Robotics events score 1 when the event is about the hardware, the build, or
+  a robotics competition rather than about AI. Youth and STEM robotics
+  outreach, build-a-bot workshops, and FIRST/BEST-style competitions are the
+  common case, and a technology-forward corporate sponsor attached to one
+  does not change that. A robotics event that genuinely centers on AI -
+  machine perception, autonomy, reinforcement learning, or a specific AI
+  session or speaker - is judged normally on that AI content.
 - In-person events in Georgia score highest. Events located outside metro
   Atlanta should be favored over an otherwise-comparable Atlanta event - the
   scraped sites skew heavily toward Atlanta, and the digest should read as
@@ -50,10 +64,20 @@ SCORING_CRITERIA = """
   - Georgia Tech, Georgia State, UGA, Emory, and other Georgia universities.
   - Georgia Manufacturing Alliance.
   - Atlanta AI Tinkerers and ATL BitLab.
+  - The AI Collective's Atlanta and other Georgia chapters (its national
+    body and its chapters in other cities do not count as a Georgia tie).
   - Any host whose name contains "Georgia" or "Atlanta".
   This bears on the location/Georgia judgment ONLY. A Georgia host is never
   by itself evidence that the event has AI content - that is still judged
   from the event's own title and description, per the first rule above.
+- A TAG event WITH genuine AI content scores 5. TAG is the client's most
+  valued source and they asked for this explicitly: once an event clears the
+  AI-content bar above, being a TAG event makes it a 5 even if it is
+  virtual, even if the listing is thin, and even if the virtual-only or
+  Atlanta-centric rules would otherwise cap it lower - those caps do not
+  apply to TAG. This uplift never overrides the automatic-1 rule: a TAG
+  event with no AI content of its own (a membership intro, a networking
+  mixer, a non-AI topic society meeting) is still a 1.
 - Educational AI events are good (technical talks, conferences, industry
   discussions on AI).
 - Pure paid AI training or events that are heavy-handed sales pitches for the

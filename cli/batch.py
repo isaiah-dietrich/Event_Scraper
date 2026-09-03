@@ -78,6 +78,7 @@ SITE_URLS = [
     "https://www.meetup.com/find/?source=EVENTS&categoryId=546&location=us--georgia",
     "https://luma.com/genai-collective",
     "https://www.eventbrite.com/d/united-states--georgia/science-and-tech--events--this-month/?page=1",
+    "https://www.eventbrite.com/o/86600387793",
     "https://atlanta.aitinkerers.org/",
     "https://www.meetup.com/atlbitlab/events/",
     "https://ai.georgia.gov/events"
