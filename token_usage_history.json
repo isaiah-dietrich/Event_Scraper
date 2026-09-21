@@ -110,5 +110,13 @@
     "input_tokens": 232112,
     "output_tokens": 28447,
     "total_tokens": 260559
+  },
+  {
+    "timestamp": "2026-09-21T19:05:31",
+    "mode": "normal",
+    "call_count": 81,
+    "input_tokens": 210130,
+    "output_tokens": 26399,
+    "total_tokens": 236529
   }
 ]
