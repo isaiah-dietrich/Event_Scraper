@@ -51,6 +51,10 @@ SCORING_CRITERIA = """
   for it, and do not cite the absent location as a reason in your
   explanation. A known in-person AI conference should still score well even
   if a particular scraped listing for it lacks a location field.
+- "is_in_person": false is NOT evidence that an event is virtual. It is often
+  just a default filled in when the listing gave no format. Apply the
+  wording test above to the title, location, and description, and ignore
+  that field when it is the only sign of a virtual event.
 - Events that are virtual-only by the wording test above score 2 or below
   unless they are clearly Georgia-focused or hosted by an organization
   headquartered or based in Georgia, in which case they can score 3-4. A
@@ -80,6 +84,16 @@ SCORING_CRITERIA = """
   mixer, a non-AI topic society meeting) is still a 1.
 - Educational AI events are good (technical talks, conferences, industry
   discussions on AI).
+- In-person AI builder events in Georgia score 5. These are the events the
+  client most wants to attend: meetups, show-and-tells, demo nights, and
+  hands-on sessions where people who are actually building with AI present
+  their own projects. The talks cover the tools, tech stacks, and approach
+  they used and the real lessons they learned, and are followed by Q&A and
+  networking with a mixed crowd of founders, engineers, and product
+  managers. A recurring series (a numbered or monthly edition) is a plus,
+  because it means an active community the client can keep going back to.
+  Do not lower these for a short or informal format, a low price, or a small
+  local host instead of a large organization.
 - Pure paid AI training or events that are heavy-handed sales pitches for the
   organizer's core business score low.
 - Multi-day conferences are fine even if they cost money.

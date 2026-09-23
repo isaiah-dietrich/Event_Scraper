@@ -39,10 +39,11 @@ explanation) where each element is an object with exactly these fields:
 {fields}.
 
 Rules:
-- "is_in_person" must be a JSON boolean (true/false), inferred from the event
-  details.
-- If a field is unknown/missing, use an empty string "" (or false for
-  is_in_person).
+- "is_in_person" must be a JSON boolean (true/false). Set it to false ONLY
+  when the event's own details say it is virtual - "virtual", "online",
+  "webinar", "Zoom", "livestream", "remote", or similar. Otherwise, including
+  when no location or format is given at all, set it to true.
+- If any other field is unknown/missing, use an empty string "".
 - Links in the page text appear as Markdown links: "[Label](https://...)" -
   the URL inside the parentheses is that link's actual target. Set
   "signup_link" to the URL that best reaches this event's own page or
