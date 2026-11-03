@@ -94,6 +94,29 @@ SCORING_CRITERIA = """
   because it means an active community the client can keep going back to.
   Do not lower these for a short or informal format, a low price, or a small
   local host instead of a large organization.
+- Events about making films, cinema, art, or music with AI score 2 at most,
+  because the client's audience is focused on the technical and social side
+  of AI, not the creative-arts side. This applies whenever the artistic work
+  is the point of the event - a screening of AI films, or a session on how
+  to make them - even when a presenter explains the models and hardware
+  behind it, and it overrides the builder rule above. It does not apply to
+  practical everyday uses, such as a small business making flyers, social
+  posts, or marketing content with AI, or to a talk or panel discussing how
+  AI is changing the creative industries.
+- Beginner-level AI events score 5. The client wants these because they bring
+  people with little or no AI knowledge into the community. This covers intro
+  workshops, "AI basics" and "getting started" sessions, and hands-on classes
+  on using everyday tools like ChatGPT, when the event's own text shows it is
+  meant for newcomers or says no coding or experience is needed. The 5 holds
+  for events in person in Georgia and for virtual events with a Georgia tie
+  as defined above, so being virtual does not lower those. It does not lift:
+  - a virtual event with no Georgia tie, which stays under the virtual cap;
+  - a beginner computer class with no AI content, which is still an automatic
+    1;
+  - a closed-audience event, which is still a 1;
+  - a youth or STEM robotics program, which still follows the robotics rule;
+  - commercial certification courses, corporate training products, or free
+    sessions that exist to sell a course, which fall under the next rule.
 - Pure paid AI training or events that are heavy-handed sales pitches for the
   organizer's core business score low.
 - Multi-day conferences are fine even if they cost money.
