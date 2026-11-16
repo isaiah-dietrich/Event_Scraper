@@ -82,7 +82,8 @@ SITE_URLS = [
     "https://atlanta.aitinkerers.org/",
     "https://www.meetup.com/atlbitlab/events/",
     "https://ai.georgia.gov/events",
-    "https://technorthatlanta.org/events/list/"
+    "https://technorthatlanta.org/events/list/",
+    "https://aievents.now/atlanta",
 ]
 
 # Each site gets its own fetch (a Firecrawl scrape call, see scrape.fetch)
