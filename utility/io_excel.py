@@ -7,15 +7,20 @@ Two distinct outputs share the same columns and banded-table styling:
   on first run) is the permanent, append-only record of every event ever
   seen. It exists purely as a dedupe store + history for the pipeline; no
   client ever opens or edits it. `append_rows` grows it and
-  `read_existing_event_keys` reads its dedupe keys back.
+  `read_seen_events` reads its dedupe index back.
 - The **weekly digest** is a fresh, standalone workbook rebuilt from scratch
   every run and emailed to the client. `write_weekly_digest` produces it.
 
 Output rows are written into a self-expanding Excel Table (blue/white
 banded style) so each sheet stays sortable/filterable as it grows.
+
+Deciding whether two rows are the same event lives here too (`SeenEvents`),
+because the master is what every dedupe check is ultimately made against.
 """
 
 import os
+import re
+import unicodedata
 
 from openpyxl import load_workbook
 from openpyxl import Workbook
@@ -29,8 +34,8 @@ TABLE_STYLE = "TableStyleMedium2"  # Built-in blue header, white/light-blue band
 EVENTS_SHEET_NAME = "Events"
 REJECTED_SHEET_NAME = "Rejected Events"
 
-# Statuses whose rows participate in cross-run dedupe (see _event_key,
-# _existing_event_keys, _append_to_sheet).
+# Statuses whose rows participate in cross-run dedupe (see SeenEvents,
+# _record_sheet_events, _append_to_sheet).
 _DEDUPE_STATUSES = {"ok"}
 
 # Internal row keys, in the order they should appear in each sheet.
@@ -90,42 +95,200 @@ def _is_rejected(row: dict) -> bool:
     )
 
 
-def event_key(title: str, date) -> tuple:
-    """Builds a dedupe key for an event: title + date.
+# --- Dedupe ------------------------------------------------------------------
+#
+# Two rows are the same event when their *normalized* titles and their dates
+# match, and neither their location nor their start time clearly disagrees.
+#
+# Normalizing the title is what catches the same event cross-posted on two
+# sites with cosmetic differences ("IBM Meetup 2026-3 – Know Your Agents" vs
+# "IBM Meetup 2026-3: Know Your Agents", "(w/ The AI Collective)" vs "(with
+# The AI Collective)"), or re-listed a week later with a capitalization or
+# spacing fix - an exact-title key let all of those through as "new". It is
+# deliberately cosmetic-only (case, punctuation, whitespace, accents, "w/",
+# "&"): it never drops or fuzzy-matches *words*, because a word difference is
+# often the only thing separating two real events ("PMP Training in
+# Savannah" vs "... in Atlanta", "Tour - MORNING" vs "Tour - AFTERNOON").
+#
+# Location and start time are only ever vetoes, never a reason to match. The
+# owner's stated preference is a duplicate over a missed event, so a
+# confident disagreement on where or when keeps both rows. A blank or
+# uninformative value carries no evidence either way and never vetoes - that
+# is the common case of one site simply not listing it.
+#
+# The location check has to be lenient, because the same event's location
+# is written very differently from site to site (measured over the master:
+# "Sandy Springs, GA" vs "Mutation Brewing and Distilling Company", "Atlanta"
+# vs "Atlanta, Georgia"). Any one meaningful word in common counts as
+# agreement; only two locations sharing *no* word veto. That means some
+# genuine cross-site duplicates still get through as two rows - the accepted
+# cost of never merging two different events.
 
-    Public so cli.batch can build an identical key for an event that hasn't
-    been written yet, to skip re-scoring it (see read_existing_event_keys).
+# Words that say nothing about *which* venue an event is at: the state every
+# event is in, filler words, street-address boilerplate, and placeholders.
+# Dropped before comparing locations, so "Atlanta, GA" and "Midtown, Georgia"
+# don't count as agreeing just because both mention Georgia.
+_LOCATION_NOISE_WORDS = frozenset({
+    "ga", "georgia", "usa", "us", "united", "states", "america",
+    "the", "an", "at", "of", "and", "in", "on", "near", "with", "for", "by", "to", "or",
+    "tbd", "tba", "venue", "location", "address", "shared", "registration",
+    "suite", "ste", "floor", "fl", "room", "rm", "building", "bldg", "unit",
+    "street", "st", "road", "rd", "avenue", "ave", "boulevard", "blvd",
+    "drive", "dr", "parkway", "pkwy", "highway", "hwy", "lane", "ln", "way",
+    "court", "ct", "place", "pl", "circle", "cir",
+    "nw", "ne", "sw", "se", "north", "south", "east", "west",
+})
+
+# Different words for "not in person", folded together so "Online" and
+# "Virtual (Zoom)" agree with each other but still disagree with "Atlanta".
+_ONLINE_LOCATION_WORDS = frozenset({"online", "virtual", "zoom", "webinar", "remote"})
+
+# A clock time: "4:30 PM", "4:30PM", "5 p.m.", "17:30". The lookarounds keep
+# it from matching inside a longer number such as a year or a street number.
+_CLOCK_TIME_PATTERN = re.compile(
+    r"(?<![\d:])(\d{1,2})(?::([0-5]\d))?(?!\d)\s*(?:([ap])\.?\s?m\b)?"
+)
+_MERIDIEM_PATTERN = re.compile(r"(?<![a-z])([ap])\.?\s?m\b")
+
+
+def _normalize_text(text) -> str:
+    """Lowercases text and strips cosmetic differences (see "Dedupe" above):
+    accents, punctuation, whitespace runs, and the "w/"/"&" abbreviations.
+    Never removes or rewrites a word.
+    """
+    text = unicodedata.normalize("NFKD", str(text or "")).lower()
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"\bw/", " with ", text)
+    text = text.replace("&", " and ")
+    return " ".join(re.sub(r"[\W_]+", " ", text).split())
+
+
+def _location_words(location) -> frozenset:
+    """The words of a location that could tell two venues apart.
+
+    Empty when the location is blank or says nothing specific ("Georgia",
+    "TBD", "Venue shared with registration"), which is what makes such a
+    location unable to veto a match (see _facets_agree).
+    """
+    words = set()
+    for word in _normalize_text(location).split():
+        if len(word) < 2 or word in _LOCATION_NOISE_WORDS:
+            continue
+        words.add("online" if word in _ONLINE_LOCATION_WORDS else word)
+    return frozenset(words)
+
+
+def _start_minutes(start_time):
+    """An event's start time as minutes after midnight, or None when the text
+    holds no recognizable clock time (blank, "TBD", "Noon").
+
+    Only the *first* time counts, so "11:00 AM - 1:30 PM EST" and "11:00 AM"
+    agree. A start time with no am/pm of its own borrows the next one in the
+    text, so "5:30 - 7:30 PM" reads as 5:30 PM. A bare number with neither
+    minutes nor am/pm (a day of the month, say) is not treated as a time.
+    """
+    text = str(start_time or "").lower()
+    for match in _CLOCK_TIME_PATTERN.finditer(text):
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        meridiem = match.group(3)
+        if meridiem is None and match.group(2) is None:
+            continue
+        if meridiem is None:
+            later = _MERIDIEM_PATTERN.search(text, match.end())
+            meridiem = later.group(1) if later else None
+        if meridiem is not None:
+            if not 1 <= hour <= 12:
+                return None
+            hour = hour % 12 + (12 if meridiem == "p" else 0)
+        elif hour > 23:
+            return None
+        return hour * 60 + minute
+    return None
+
+
+def _facets(event: dict) -> tuple:
+    """The (location words, start minutes) a match has to agree on."""
+    return (_location_words(event.get("location")), _start_minutes(event.get("start_time")))
+
+
+def _facets_agree(first: tuple, second: tuple) -> bool:
+    """False only when location or start time confidently disagree.
+
+    A blank/uninformative value on either side can't disagree with anything
+    (see _location_words, _start_minutes).
+    """
+    (first_words, first_minutes), (second_words, second_minutes) = first, second
+    if first_words and second_words and not first_words & second_words:
+        return False
+    if first_minutes is not None and second_minutes is not None and first_minutes != second_minutes:
+        return False
+    return True
+
+
+def event_key(title: str, date) -> tuple:
+    """Builds the dedupe key for an event: normalized title + date.
+
+    Rows that share this key are *candidate* duplicates; SeenEvents then lets
+    location and start time veto the match (see "Dedupe" above).
+
     `date` is expected to be a real datetime.datetime for a successfully
     parsed date (see cli.batch._filter_past_events) - openpyxl always reads
     date cells back as datetime.datetime too, which is exactly why a key
     built here from a freshly-filtered event compares equal to the same
-    event's key read back from a previous run's output file.
+    event's key read back from a previous run's output file. A blank or
+    missing date is "" on both paths.
 
     Deliberately excludes source_url (there is no longer a URL column in
     the output - see OUTPUT_COLUMNS): the same event cross-posted on two
-    different sites now dedupes to a single row instead of one per site.
+    different sites dedupes to a single row instead of one per site.
     """
-    return (title, date)
+    return (_normalize_text(title), date or "")
 
 
 def _event_key(row: dict) -> tuple:
-    """Builds a dedupe key for an event row: title + date."""
-    return event_key(row.get("title", ""), row.get("date", ""))
+    """Builds the dedupe key for an event row (see event_key)."""
+    return event_key(row.get("title"), row.get("date"))
 
 
-def _existing_event_keys(sheet) -> set:
-    """Collects dedupe keys for every dedupe-eligible row already in the
-    sheet (see _DEDUPE_STATUSES)."""
+class SeenEvents:
+    """A dedupe index of events already recorded.
+
+    Works on both a freshly-extracted event dict and an output row dict,
+    since both carry the title/date/location/start_time fields it reads.
+    Used for the master workbook's history (read_seen_events, append_rows)
+    and for collapsing duplicates across sites within a single run (see
+    cli.batch). Safe to read from several threads at once as long as nobody
+    is adding to it at the same time - which is how process_site uses it.
+    """
+
+    def __init__(self) -> None:
+        self._facets_by_key: dict[tuple, list[tuple]] = {}
+
+    def __len__(self) -> int:
+        return sum(len(facets) for facets in self._facets_by_key.values())
+
+    def contains(self, event: dict) -> bool:
+        """True if an already-recorded event is the same event as this one."""
+        facets = _facets(event)
+        return any(
+            _facets_agree(facets, recorded)
+            for recorded in self._facets_by_key.get(_event_key(event), ())
+        )
+
+    def add(self, event: dict) -> None:
+        """Records an event, so later rows matching it count as duplicates."""
+        self._facets_by_key.setdefault(_event_key(event), []).append(_facets(event))
+
+
+def _record_sheet_events(sheet, seen: SeenEvents) -> None:
+    """Adds every dedupe-eligible row already in the sheet (see
+    _DEDUPE_STATUSES) to `seen`."""
     status_index = OUTPUT_COLUMNS.index("status")
-    title_index = OUTPUT_COLUMNS.index("title")
-    date_index = OUTPUT_COLUMNS.index("date")
-
-    keys = set()
-    for row in sheet.iter_rows(min_row=2, values_only=True):
-        if not row or row[status_index] not in _DEDUPE_STATUSES:
+    for values in sheet.iter_rows(min_row=2, values_only=True):
+        if not values or values[status_index] not in _DEDUPE_STATUSES:
             continue
-        keys.add((row[title_index] or "", row[date_index] or ""))
-    return keys
+        seen.add(dict(zip(OUTPUT_COLUMNS, values)))
 
 
 def _apply_table(sheet, last_row: int) -> None:
@@ -219,23 +382,22 @@ def _get_or_create_sheet(workbook, title: str):
     return sheet
 
 
-def _append_to_sheet(sheet, rows: list[dict], existing_keys: set) -> int:
+def _append_to_sheet(sheet, rows: list[dict], seen: SeenEvents) -> int:
     """Appends rows to one sheet, skipping dedupe-eligible rows (see
-    _DEDUPE_STATUSES) already in existing_keys.
+    _DEDUPE_STATUSES) that `seen` already contains.
 
-    Mutates existing_keys with the key of every dedupe-eligible row actually
-    written, so a single key set can be shared across sheets to prevent the
-    same event ending up duplicated across Events and Rejected Events.
+    Adds every dedupe-eligible row actually written to `seen`, so a single
+    index can be shared across sheets to prevent the same event ending up
+    duplicated across Events and Rejected Events.
     """
     skipped_count = 0
     for row in rows:
         if row.get("status") in _DEDUPE_STATUSES:
-            key = _event_key(row)
-            if key in existing_keys:
+            if seen.contains(row):
                 skipped_count += 1
-                print(f"  [dedup skip] {key[0]} | {key[1]}")
+                print(f"  [dedup skip] {row.get('title', '')} | {row.get('date', '')}")
                 continue
-            existing_keys.add(key)
+            seen.add(row)
         sheet.append([row.get(column, "") for column in OUTPUT_COLUMNS])
 
     _apply_table(sheet, sheet.max_row)
@@ -254,11 +416,11 @@ def append_rows(path: str, rows: list[dict]) -> None:
     A scored event is routed to Rejected Events if the model gave it
     fit_score 1 with high confidence, and everything else (including
     non-"ok" failure/no_events rows) goes to Events. Dedupe-eligible rows
-    (see _DEDUPE_STATUSES) are skipped if a row with the same title and date
-    is already present in either sheet, so re-running the batch over the same
+    (see _DEDUPE_STATUSES) are skipped if the same event is already present
+    in either sheet (see SeenEvents), so re-running the batch over the same
     sites does not duplicate events or let one flip between sheets across
-    runs - and the same event cross-posted on two different sites now
-    collapses to a single row (see event_key).
+    runs - and the same event cross-posted on two different sites collapses
+    to a single row.
 
     Args:
         path: Path to the master .xlsx file. Row dicts may still carry a
@@ -276,42 +438,43 @@ def append_rows(path: str, rows: list[dict]) -> None:
     events_sheet = _get_or_create_sheet(workbook, EVENTS_SHEET_NAME)
     rejected_sheet = _get_or_create_sheet(workbook, REJECTED_SHEET_NAME)
 
-    existing_keys = _existing_event_keys(events_sheet) | _existing_event_keys(rejected_sheet)
+    seen = SeenEvents()
+    _record_sheet_events(events_sheet, seen)
+    _record_sheet_events(rejected_sheet, seen)
     normal_rows = [row for row in rows if not _is_rejected(row)]
     rejected_rows = [row for row in rows if _is_rejected(row)]
 
-    skipped_count = _append_to_sheet(events_sheet, normal_rows, existing_keys)
-    skipped_count += _append_to_sheet(rejected_sheet, rejected_rows, existing_keys)
+    skipped_count = _append_to_sheet(events_sheet, normal_rows, seen)
+    skipped_count += _append_to_sheet(rejected_sheet, rejected_rows, seen)
 
     workbook.save(path)
     if skipped_count:
         print(f"Skipped {skipped_count} duplicate event(s) already in {path}")
 
 
-def read_existing_event_keys(path: str) -> set:
-    """Returns the dedupe keys of every event already in the master workbook.
+def read_seen_events(path: str) -> SeenEvents:
+    """Returns a dedupe index of every event already in the master workbook.
 
-    This is the union of _existing_event_keys over both the Events and
-    Rejected Events sheets, i.e. exactly the set append_rows would dedupe
-    a new run's rows against. Callers (see cli.batch) use it to skip
-    scoring an event before it's even written, rather than paying for a
-    scoring AI call only to have the row silently dropped by write-time
-    dedupe in append_rows.
+    Built from both the Events and Rejected Events sheets, i.e. exactly what
+    append_rows would dedupe a new run's rows against. Callers (see
+    cli.batch) use it to skip scoring an event before it's even written,
+    rather than paying for a scoring AI call only to have the row silently
+    dropped by write-time dedupe in append_rows.
 
-    Returns an empty set if no file exists at `path` yet - the natural
+    Returns an empty index if no file exists at `path` yet - the natural
     "nothing known" starting point for a first run.
     """
+    seen = SeenEvents()
     if not os.path.exists(path):
-        return set()
+        return seen
     workbook = load_workbook(path)
-    keys = set()
     for title in (EVENTS_SHEET_NAME, REJECTED_SHEET_NAME):
         if title not in workbook.sheetnames:
             continue
         sheet = workbook[title]
         _validate_header(sheet)
-        keys |= _existing_event_keys(sheet)
-    return keys
+        _record_sheet_events(sheet, seen)
+    return seen
 
 
 # --- Weekly client digest ----------------------------------------------------
@@ -319,7 +482,8 @@ def read_existing_event_keys(path: str) -> set:
 # write_weekly_digest builds the fresh, standalone workbook emailed to the
 # client each week. Unlike the master, it is rebuilt from scratch every run
 # and carries no dedupe/history state - the caller has already deduped this
-# run's rows against the master before handing them here.
+# run's rows against the master, and across this run's sites, before handing
+# them here.
 
 
 def write_weekly_digest(path: str, rows: list[dict]) -> None:
@@ -335,7 +499,8 @@ def write_weekly_digest(path: str, rows: list[dict]) -> None:
     empty.
 
     Rows are written in OUTPUT_COLUMNS order with no dedupe - the caller has
-    already deduped against the master. The signup_link "*" convention
+    already deduped against the master and across sites (see
+    cli.batch._drop_cross_site_duplicates). The signup_link "*" convention
     (base-URL fallback flagged with a trailing " *" when extraction found no
     direct link) passes through untouched, since rows already carry it. The
     digest deliberately reuses the same columns and banded-table styling as

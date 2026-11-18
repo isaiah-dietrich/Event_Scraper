@@ -43,8 +43,8 @@ from utility.email_digest import render_client_body
 from utility.email_digest import send_health_alert
 from utility.email_digest import send_weekly_digest
 from utility.io_excel import append_rows
-from utility.io_excel import event_key
-from utility.io_excel import read_existing_event_keys
+from utility.io_excel import read_seen_events
+from utility.io_excel import SeenEvents
 from utility.io_excel import write_weekly_digest
 from utility.run_health import classify_run
 from utility.run_health import report_for_crash
@@ -389,23 +389,23 @@ def _build_event_row(base_row: dict, event: dict, url: str) -> dict:
 
 
 def process_site(
-    client: Anthropic, url: str, known_keys: frozenset = frozenset()
+    client: Anthropic, url: str, seen_events: SeenEvents | None = None
 ) -> list[dict]:
     """Runs _process_site_once, retrying once on an unexpected failure.
 
     Args:
         client: An initialized Anthropic client.
         url: The site URL to scrape.
-        known_keys: See _process_site_once.
+        seen_events: See _process_site_once.
 
     Returns:
         See _process_site_once.
     """
     try:
-        return _process_site_once(client, url, known_keys)
+        return _process_site_once(client, url, seen_events)
     except Exception:
         time.sleep(_TRANSIENT_RETRY_WAIT_SECONDS)
-        return _process_site_once(client, url, known_keys)
+        return _process_site_once(client, url, seen_events)
 
 
 # A per-site pipeline run can fail transiently for reasons that have nothing
@@ -426,26 +426,26 @@ _TRANSIENT_RETRY_WAIT_SECONDS = 10
 
 
 def _process_site_once(
-    client: Anthropic, url: str, known_keys: frozenset = frozenset()
+    client: Anthropic, url: str, seen_events: SeenEvents | None = None
 ) -> list[dict]:
     """Runs fetch, reduce, and extract for one site.
 
     Args:
         client: An initialized Anthropic client.
         url: The site URL to scrape.
-        known_keys: Dedupe keys (see utility.io_excel.event_key) for events
-            already present in the output workbook from a previous run.
-            After date-filtering, any event whose key is in known_keys is
-            dropped before scoring - no scoring call, no output row - since
-            write-time dedupe in append_rows would silently drop its row
-            anyway, so scoring it first would only have been wasted API
-            cost. Defaults to an empty set so existing callers are unaffected.
+        seen_events: Events already present in the master workbook from a
+            previous run (see utility.io_excel.SeenEvents). After
+            date-filtering, any event it contains is dropped before scoring -
+            no scoring call, no output row - since write-time dedupe in
+            append_rows would silently drop its row anyway, so scoring it
+            first would only have been wasted API cost. None (the default)
+            means nothing is known yet.
 
     Returns:
         A list of output row dicts: one per extracted event on success, or
         a single row describing the failure/empty-result status otherwise.
         Can also be an empty list if every extracted event turned out to
-        already be known (see known_keys).
+        already be known (see seen_events).
     """
     # "title" defaults to the site URL so failure/no_events rows - which
     # have no event of their own - stay identifiable now that there's no
@@ -478,12 +478,11 @@ def _process_site_once(
     if not events:
         return [{**base_row, "status": "no_events"}]
 
-    if known_keys:
+    if seen_events:
         remaining = []
         skipped_count = 0
         for event in events:
-            key = event_key(event.get("title", ""), event.get("date", ""))
-            if key in known_keys:
+            if seen_events.contains(event):
                 skipped_count += 1
             else:
                 remaining.append(event)
@@ -514,6 +513,50 @@ def _process_site_once(
             rows.append(row)
 
     return rows
+
+
+def _drop_cross_site_duplicates(rows_by_url: dict[str, list[dict]]) -> None:
+    """Removes "ok" rows that duplicate an event another site produced this
+    run, mutating rows_by_url in place.
+
+    The master-workbook dedupe in process_site only knows about *previous*
+    runs, and the digest is written straight from this run's rows - so
+    before this existed, an event listed on two sites in the same week went
+    to the client twice, even when both listings had the identical title.
+    What counts as "the same event" is utility.io_excel.SeenEvents, the same
+    rule the master uses.
+
+    Of each group of duplicates, the copy with the highest fit_score is kept
+    (ties go to the site listed first in SITE_URLS). A copy that scored low
+    for lack of a description must never be the one that survives, since
+    that could move a good event onto the Rejected sheet - the worst outcome
+    when the goal is to never miss one.
+
+    A site left with no rows reads "no new events" in the email, the same
+    as a site whose events were all already in the master.
+    """
+    candidates = [
+        (row, url)
+        for url in SITE_URLS
+        for row in rows_by_url[url]
+        if row.get("status") == "ok"
+    ]
+    # sorted() is stable, so equal scores stay in SITE_URLS order.
+    candidates = sorted(candidates, key=lambda pair: -(pair[0].get("fit_score") or 0))
+
+    kept = SeenEvents()
+    dropped_ids = set()
+    for row, url in candidates:
+        if kept.contains(row):
+            dropped_ids.add(id(row))
+            print(f"    [dup across sites] {row.get('title')} (from {url})")
+        else:
+            kept.add(row)
+
+    if dropped_ids:
+        print(f"Dropped {len(dropped_ids)} event(s) already found on another site this run")
+        for url in SITE_URLS:
+            rows_by_url[url] = [row for row in rows_by_url[url] if id(row) not in dropped_ids]
 
 
 def _site_status_line(rows: list[dict]) -> str:
@@ -570,17 +613,18 @@ def _run_pipeline(
         new events to write one for.
     """
     # Pre-scoring dedupe: load which events are already in the master workbook
-    # (an empty set if the file doesn't exist yet - a first run is naturally
-    # all-new) so process_site can skip a Haiku scoring call for any event
-    # already recorded, instead of scoring it only to have it deduped away.
-    known_keys = frozenset(read_existing_event_keys(MASTER_PATH))
+    # (empty if the file doesn't exist yet - a first run is naturally all-new)
+    # so process_site can skip a Haiku scoring call for any event already
+    # recorded, instead of scoring it only to have it deduped away. Only read
+    # from here on, so sharing it across the worker threads is safe.
+    seen_events = read_seen_events(MASTER_PATH)
 
     print(f"Processing {len(SITE_URLS)} site(s) (up to {MAX_WORKERS} at a time)...")
 
     rows_by_url: dict[str, list[dict]] = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_url = {
-            executor.submit(process_site, client, url, known_keys): url for url in SITE_URLS
+            executor.submit(process_site, client, url, seen_events): url for url in SITE_URLS
         }
         for future in as_completed(future_to_url):
             url = future_to_url[future]
@@ -598,6 +642,11 @@ def _run_pipeline(
                 suffix = f": {row.get('title')}" if row["status"] == "ok" else ""
                 print(f"    -> {row['status']}{suffix}")
             rows_by_url[url] = rows
+
+    # Before anything is counted, enriched, or written: the dedupe above only
+    # knows about previous runs, so the same event found on two sites this
+    # week would otherwise reach the client twice.
+    _drop_cross_site_duplicates(rows_by_url)
 
     # Flatten in SITE_URLS order so the master write and the email body are
     # both deterministic regardless of which site finished first.
