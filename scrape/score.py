@@ -22,7 +22,17 @@ SCORING_CRITERIA = """
   speaker, or stated theme) even within a broader-themed event, score it on
   that component instead - the automatic-1 rule only applies when the event
   truly has no AI content, not merely because its overall framing isn't
-  AI-specific.
+  AI-specific. AI infrastructure also counts as AI content (next rule).
+- Events about the physical infrastructure that AI runs on count as having
+  AI content, even when the text never says "AI". The client considers
+  these part of the AI ecosystem because AI is what is driving their growth.
+  This covers data centers (summits, tours, site development, data center
+  policy), large-scale compute and GPU capacity, and the power, energy, and
+  cooling supply for data centers. Score these normally from there - a TAG
+  data center event, for example, is a TAG event with AI content. It does
+  not cover general IT or telecom topics that are not about data centers or
+  compute, such as fiber or broadband buildout, office networking, or
+  cybersecurity, which still need AI content of their own.
 - Events restricted to a closed audience the client cannot join - state
   government employees only, a single company's staff, one school's enrolled
   students, or members-only with no public registration path - score 1 no
